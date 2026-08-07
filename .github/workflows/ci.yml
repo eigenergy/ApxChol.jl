@@ -26,7 +26,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: samtalki/apxchol
-          ref: c3dfbab1238e1b76d9db245b9a56a00ed4bc504e
+          ref: f1830f24fce12852536f4b6026c0dae99c0015d5
       - name: Install build dependencies
         run: |
           sudo apt-get update -qq
@@ -74,13 +74,16 @@ jobs:
       - name: Check OpenMP runtime
         run: |
           julia --project=. -e '
-            using ApproxCholesky, Libdl
+            using ApproxCholesky, LLVMOpenMP_jll, Libdl
+            prefixes = ("libomp", "libiomp", "libgomp")
             runtimes = filter(Libdl.dllist()) do path
                 name = lowercase(basename(path))
-                occursin("libomp", name) || occursin("libgomp", name)
+                any(prefix -> startswith(name, prefix), prefixes)
             end
             unique_runtimes = unique(realpath.(runtimes))
             println.(unique_runtimes)
             length(unique_runtimes) == 1 ||
                 error("expected one OpenMP runtime, found " * string(length(unique_runtimes)))
+            only(unique_runtimes) == realpath(LLVMOpenMP_jll.libomp_path) ||
+                error("wrapper loaded a runtime other than LLVMOpenMP_jll")
           '
