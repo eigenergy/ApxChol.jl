@@ -1,6 +1,7 @@
 name: ci
 
 on:
+  workflow_dispatch:
   push:
   pull_request:
 
@@ -8,6 +9,37 @@ permissions:
   contents: read
 
 jobs:
+  apxchol:
+    name: apxchol (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: GCC 14
+            cc: gcc-14
+            cxx: g++-14
+          - name: Clang 18
+            cc: clang-18
+            cxx: clang++-18
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: samtalki/apxchol
+          ref: 682ff1533176be98733b2bcfe85c88efe8f95c3b
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y g++-14 clang-18 libeigen3-dev \
+                                  libomp-18-dev ninja-build
+      - name: Build and test
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_C_COMPILER=${{ matrix.cc }} \
+                -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
+          cmake --build build -j"$(nproc)"
+          ctest --test-dir build --output-on-failure
+
   test:
     strategy:
       matrix:
@@ -32,3 +64,23 @@ jobs:
         run: julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.build()'
       - name: Test
         run: julia --project=. -e 'using Pkg; Pkg.test()'
+      - name: Run 9,241 bus regression
+        run: |
+          curl --fail --location --silent --show-error \
+            --output "$RUNNER_TEMP/case9241pegase.m" \
+            https://raw.githubusercontent.com/MATPOWER/matpower/2e0ef79a6c4526858ee923491d92781ad4507fb7/data/case9241pegase.m
+          julia --project=. test/regression_case9241pegase.jl \
+            "$RUNNER_TEMP/case9241pegase.m"
+      - name: Check OpenMP runtime
+        run: |
+          julia --project=. -e '
+            using ApproxCholesky, Libdl
+            runtimes = filter(Libdl.dllist()) do path
+                name = lowercase(basename(path))
+                occursin("libomp", name) || occursin("libgomp", name)
+            end
+            unique_runtimes = unique(realpath.(runtimes))
+            println.(unique_runtimes)
+            length(unique_runtimes) == 1 ||
+                error("expected one OpenMP runtime, found " * string(length(unique_runtimes)))
+          '
