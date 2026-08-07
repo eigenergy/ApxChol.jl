@@ -1,6 +1,6 @@
 using LLVMOpenMP_jll
 
-const APXCHOL_REVISION = "682ff1533176be98733b2bcfe85c88efe8f95c3b"
+const APXCHOL_REVISION = "4c485af1c6f51825fd9064581dcd124d968c79e3"
 const APXCHOL_REPOSITORY = "https://github.com/samtalki/apxchol.git"
 
 function checked_source_directory()
