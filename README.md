@@ -48,8 +48,8 @@ result.solve_seconds
 
 `A` must be a `SparseMatrixCSC` containing a Laplacian or SDDM matrix.
 `threads=0` leaves the OpenMP runtime setting unchanged. Setting a positive
-thread count changes the OpenMP setting for the calling process, so concurrent
-calls with different thread counts are unsupported.
+thread count applies for the duration of the solve, then restores the caller's
+previous setting.
 
 ## Apple Silicon
 

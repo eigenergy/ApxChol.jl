@@ -1,4 +1,5 @@
 using ApproxCholesky
+using LLVMOpenMP_jll
 using LinearAlgebra
 using SparseArrays
 using Test
@@ -33,8 +34,13 @@ end
     A = spdiagm(-1 => -ones(n - 1), 0 => [1.0; fill(2.0, n - 2); 1.0],
                 1 => -ones(n - 1))
     b = [isodd(i) ? 1.0 : -1.0 for i in 1:n]
-    result = solve(A, b; tolerance=1e-9, threads=min(4, Sys.CPU_THREADS))
+    previous_threads = ccall(
+        (:omp_get_max_threads, LLVMOpenMP_jll.libomp_path), Cint, ())
+    requested_threads = previous_threads == 1 ? 2 : 1
+    result = solve(A, b; tolerance=1e-9, threads=requested_threads)
     @test norm(A * result.x - b) / norm(b) < 1e-9
+    @test ccall((:omp_get_max_threads, LLVMOpenMP_jll.libomp_path), Cint, ()) ==
+          previous_threads
 end
 
 @testset "argument checks" begin
