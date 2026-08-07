@@ -1,0 +1,4 @@
+/deps/build/
+/deps/build.log
+/deps/usr/
+/Manifest.toml

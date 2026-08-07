@@ -1,0 +1,34 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1.10'
+      - name: Install Linux compiler and Eigen
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y clang-18 cmake libeigen3-dev
+          echo "CXX=clang++-18" >> "$GITHUB_ENV"
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: brew install cmake eigen
+      - uses: julia-actions/cache@v2
+      - name: Instantiate and build
+        run: julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.build()'
+      - name: Test
+        run: julia --project=. -e 'using Pkg; Pkg.test()'
