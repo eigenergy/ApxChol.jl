@@ -57,8 +57,9 @@ enum {
     APXCHOL_STATUS_INVALID_ARGUMENT = 2, /* pointers, sizes, CSC, option values */
     APXCHOL_STATUS_INVALID_OPERATOR = 3, /* the operator contract rejected A */
     APXCHOL_STATUS_NO_FACTOR_VALUES = 4, /* factor export without keep_factor_values */
-    APXCHOL_STATUS_UNSUPPORTED = 5,      /* backend not built/available; newer struct */
-    APXCHOL_STATUS_OUT_OF_MEMORY = 6,
+    APXCHOL_STATUS_UNSUPPORTED = 5,      /* backend not built/available; newer struct; an
+                                            operator the backend cannot represent */
+    APXCHOL_STATUS_OUT_OF_MEMORY = 6,    /* host or device memory */
     APXCHOL_STATUS_INTERNAL_ERROR = 7
 };
 
@@ -105,7 +106,8 @@ typedef struct apxchol_solve_info {
     uint32_t struct_size;
     int32_t converged;                /* 1 iff relative_residual < tol */
     int64_t iterations;
-    double relative_residual;         /* the PCG's relative residual at exit */
+    double relative_residual;         /* at exit: CPU the PCG recursion's; METAL
+                                         ||b - A x|| / ||b|| recomputed in fp64 */
     double solve_seconds;
 } apxchol_solve_info;
 
@@ -154,9 +156,10 @@ APXCHOL_C_API apxchol_status apxchol_solver_solve(
 
 /* k right-hand sides, column-major n*k. x0 NULL starts every column from zero.
  * The per-column outputs are nullable arrays of length k. Every column uses
- * the single-solve stopping rule; the CPU backend solves columns in order
- * (bit-identical to single solves), other backends may advance them in
- * lockstep. Returns NOT_CONVERGED if any column did not converge. */
+ * the single-solve stopping rule; the CPU backend solves columns in order,
+ * METAL advances up to 64 columns in lockstep; on both, every column is
+ * bit-identical to its single solve. Returns NOT_CONVERGED if any column did
+ * not converge. */
 APXCHOL_C_API apxchol_status apxchol_solver_solve_block(
     apxchol_solver* solver, int64_t k, const double* b, const double* x0, double* x,
     double tol, int32_t max_iter, int64_t* iterations, double* relative_residuals,
