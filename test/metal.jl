@@ -1,4 +1,5 @@
-# Metal backend (Apple silicon builds with a usable GPU). Included by runtests.jl.
+# Metal backend (Apple silicon builds with a usable GPU). Included by runtests.jl, whose
+# helpers (grid_laplacian, compatible_rhs, relres, bits, reweighted) it uses.
 
 @testset "Metal backend" begin
     @testset "Laplacian converges on the original operator; agrees with the CPU" begin
@@ -58,6 +59,44 @@
         zf = ApxChol.aspreconditioner(F) \ r
         zg = ApxChol.aspreconditioner(G) \ r
         @test norm(zg - zf) / norm(zf) < 1e-5                   # fp32 triangular solves
+    end
+
+    @testset "factor reuse: bit identity on the own matrix, a nearby operator" begin
+        for shift in (0.0, 0.05)
+            A = grid_laplacian(30, 30; shift)
+            n = size(A, 1)
+            F = ApxCholFactor(A; seed=11, threads=1)
+            G = ApxCholSolver(A; backend=:metal, seed=11, threads=1, keep_factor=true)
+            H = ApxCholSolver(A, F; backend=:metal)
+            @test ApxChol.stats(H).backend == :metal
+            @test ApxChol.stats(H).factor_nnz == ApxChol.stats(F).factor_nnz
+            @test ApxChol.factor(ApxCholFactor(G)) == ApxChol.factor(F)
+            B = hcat(compatible_rhs(n), compatible_rhs(n; salt=3) .+ shift, zeros(n))
+            RG, RH = solve(G, B), solve(H, B)
+            @test all(RH.converged)
+            @test bits(RG.X) == bits(RH.X)
+            @test RG.iterations == RH.iterations
+            @test bits(RG.relative_residuals) == bits(RH.relative_residuals)
+            # A stale factor on a reweighted operator: the fp64 original residual.
+            A2 = reweighted(A; shift)
+            S = ApxCholSolver(A2, F; backend=:metal, rtol=1e-10, maxiter=1000)
+            b = compatible_rhs(n; salt=4)
+            r = solve(S, b)
+            @test r.converged && relres(A2, r.x, b) < 1e-10
+            @test relres(A2, r.x, b) ≈ r.relative_residual rtol = 1e-6
+            shift == 0 && @test abs(sum(r.x)) < 1e-10 * norm(r.x, 1)
+            foreach(close, (F, G, H, S))
+        end
+        # A Metal solver's factor on the CPU backend, and the class check.
+        A = grid_laplacian(12, 15)
+        G = ApxCholSolver(A; backend=:metal, keep_factor=true)
+        F = ApxCholFactor(G)
+        @test ApxChol.stats(F).backend == :cpu
+        C = ApxCholSolver(A, F)
+        b = compatible_rhs(size(A, 1); salt=6)
+        @test solve(C, b).converged
+        e = try ApxCholSolver(grid_laplacian(12, 15; shift=0.1), F; backend=:metal); nothing catch err; err end
+        @test e isa ApxCholError && e.status == :invalid_argument
     end
 
     @testset "honest non-convergence and lifetime" begin

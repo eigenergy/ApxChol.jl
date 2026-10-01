@@ -170,7 +170,8 @@ R = solve(G, B)      # up to 64 right-hand sides advance in lockstep per batch
 ```
 
 - **Factor.** The factor is computed on the CPU exactly as for `:cpu`, and
-  the GPU applies the same fp32 factor.
+  the GPU applies the same fp32 factor. `ApxCholSolver(A, F; backend=:metal)`
+  adopts an `ApxCholFactor` as on the CPU.
 - **Precision.** The Krylov vectors (x, r, A p) and an inexact operator are
   double-float (about 48 bits), since Apple GPUs have no fp64.
 - **Reported residual.** `relative_residual` is recomputed in fp64 against
