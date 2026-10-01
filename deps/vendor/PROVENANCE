@@ -6,6 +6,6 @@ deleted once the package builds against an apxchol revision that ships them.
 
 repository=https://github.com/samtalki/apxchol.git
 branch=apple-silicon
-revision=c5c7d2c23a2d6b1497640f89d1b5fcc08c2a1f14
+revision=5cbab334053edfa4cda27c9a9b59712943645e83
 files=include/apxchol/c_api.h src/c_api.cpp
 checksums=SHA256SUMS (verify with: cd deps/vendor && shasum -a 256 -c SHA256SUMS)
