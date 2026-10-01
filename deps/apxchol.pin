@@ -1,3 +1,5 @@
 # The apxchol revision this package builds. deps/build.jl and CI read it.
-repository=https://github.com/AlgOptGroup/apxchol.git
-revision=04cc45693cd286a4603e27431ce8407e2697fb99
+# The fork branch proposing the C ABI and the Metal backend upstream; repin to
+# AlgOptGroup/apxchol once that branch is merged.
+repository=https://github.com/samtalki/apxchol.git
+revision=488de0bfe3c049e8fa2aedfbceefc2b1f8b28bd2

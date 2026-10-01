@@ -47,6 +47,7 @@ end
 pin = read_pin(joinpath(DEPS, "apxchol.pin"))
 source = source_directory(pin)
 for required in ("src/factorization.cpp", "src/operator_class.cpp", "src/solve.cpp",
+                 "src/c_api.cpp", "include/apxchol/c_api.h",
                  "include/apxchol/version.h.in", "cmake/apxchol_native_arch.cmake")
     isfile(joinpath(source, required)) || error("apxchol source at $source lacks $required")
 end
@@ -76,9 +77,11 @@ isfile(library) || error("libapxchol was not installed at $library")
 cache = readlines(joinpath(build, "CMakeCache.txt"))
 compiler_line = findfirst(l -> startswith(l, "CMAKE_CXX_COMPILER:"), cache)
 compiler = compiler_line === nothing ? "unknown" : split(cache[compiler_line], '='; limit=2)[2]
+metal = any(l -> startswith(l, "CMAKE_OBJCXX_COMPILER:"), cache) ? "on" : "off"
 open(joinpath(prefix, "build_info.txt"), "w") do io
     println(io, "apxchol_source=", isempty(get(ENV, "APXCHOL_SOURCE_DIR", "")) ? pin["repository"] : source)
     println(io, "apxchol_revision=", revision)
     println(io, "libomp=", omp_library)
     println(io, "compiler=", compiler)
+    println(io, "metal=", metal)
 end

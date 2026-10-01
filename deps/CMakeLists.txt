@@ -35,39 +35,54 @@ configure_file("${_src}/include/apxchol/version.h.in"
                "${CMAKE_CURRENT_BINARY_DIR}/include/apxchol/version.h" @ONLY)
 
 add_library(apxchol SHARED
-    vendor/src/c_api.cpp
+    "${_src}/src/c_api.cpp"
     "${_src}/src/factorization.cpp"
     "${_src}/src/operator_class.cpp"
     "${_src}/src/solve.cpp")
 target_include_directories(apxchol PRIVATE
-    vendor/include "${_src}/include" "${CMAKE_CURRENT_BINARY_DIR}/include")
+    "${_src}/include" "${CMAKE_CURRENT_BINARY_DIR}/include")
 target_include_directories(apxchol SYSTEM PRIVATE
     "${eigen_SOURCE_DIR}" "${APXCHOL_JL_OPENMP_INCLUDE_DIR}")
 target_compile_definitions(apxchol PRIVATE APXCHOL_POOL_FP32)
 # Only the C ABI (visibility("default") in c_api.h) is exported.
 set_target_properties(apxchol PROPERTIES
-    CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
+    CXX_VISIBILITY_PRESET hidden OBJCXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
 
-if(APPLE)
-    target_compile_options(apxchol PRIVATE
-        "SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/compat/apxchol_macos_compat.h")
+# Apple silicon: the Metal block PCG (APXCHOL_BACKEND_METAL), as upstream's
+# APXCHOL_USE_METAL builds it. src/metal_device.mm is the only Objective-C++
+# source; it compiles the checked-in MSL at run time (no Xcode Metal toolchain).
+if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
+    set(APXCHOL_JL_METAL ON)
+    enable_language(OBJCXX)
+    set(CMAKE_OBJCXX_STANDARD 23)
+    set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
+    target_sources(apxchol PRIVATE "${_src}/src/metal_solver.cpp" "${_src}/src/metal_device.mm")
+    set_source_files_properties("${_src}/src/metal_device.mm" PROPERTIES COMPILE_OPTIONS -fobjc-arc)
+    target_include_directories(apxchol PRIVATE "${_src}/src")
+    target_compile_definitions(apxchol PRIVATE APXCHOL_USE_METAL)
+    target_link_libraries(apxchol PRIVATE "-framework Metal" "-framework Foundation"
+                          "-framework CoreGraphics")
+else()
+    set(APXCHOL_JL_METAL OFF)
 endif()
+message(STATUS "ApxChol.jl: Metal backend ${APXCHOL_JL_METAL}")
 
 # Tune for the build machine (-mcpu=native on arm64), as the root project does.
 # Only the C ABI crosses the library boundary, so no Eigen ABI is shared.
 include("${_src}/cmake/apxchol_native_arch.cmake")
 if(APXCHOL_NATIVE_ARCH_FLAG)
-    target_compile_options(apxchol PRIVATE ${APXCHOL_NATIVE_ARCH_FLAG})
+    target_compile_options(apxchol PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${APXCHOL_NATIVE_ARCH_FLAG}>")
 endif()
 target_compile_options(apxchol PRIVATE -O3)
 
 # LLVMOpenMP_jll is the only OpenMP runtime: the OpenMP flag at compile time
 # only, and the JLL's libomp linked explicitly (never libgomp). GCC objects
 # resolve through libomp's GOMP entry points.
+# (C++ sources only; the Objective-C++ device source has no OpenMP.)
 if(CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
-    target_compile_options(apxchol PRIVATE "SHELL:-Xclang -fopenmp")
+    target_compile_options(apxchol PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:SHELL:-Xclang -fopenmp>")
 else()
-    target_compile_options(apxchol PRIVATE -fopenmp)
+    target_compile_options(apxchol PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:-fopenmp>")
 endif()
 find_package(Threads REQUIRED)
 target_link_libraries(apxchol PRIVATE "${APXCHOL_JL_OPENMP_LIBRARY}" Threads::Threads)
