@@ -354,6 +354,32 @@ end
         b = collect(range(-1.0, 2.0; length=size(A, 1)))
         @test bits(solve(T, b).x) == bits(solve(S, b).x)
         @test ApxChol.factor(ApxCholFactor(T)) == ApxChol.factor(S)
+        # A factor carries no solve options: an adopting solver starts from the defaults.
+        S3 = ApxCholSolver(A; rtol=1e-3, maxiter=7, stagnation_window=3, seed=5, keep_factor=true)
+        T3 = ApxCholSolver(A, ApxCholFactor(S3))
+        o = ApxChol.options(T3)
+        @test (o.rtol, o.maxiter, o.stagnation_window) == (1e-8, 200, 50)
+        @test o.seed == 5
+        r = solve(T3, b)
+        @test r.converged && r.relative_residual < 1e-8
+        @test ApxChol.options(ApxCholSolver(A, ApxCholFactor(S3); rtol=1e-4)).rtol == 1e-4
+    end
+
+    @testset "apply: a fixed map for SDDM, fixed up to a constant for a Laplacian" begin
+        if haskey(ENV, "APXCHOL_GROUND") || haskey(ENV, "APXCHOL_CENTER_K")
+            @info "APXCHOL_GROUND or APXCHOL_CENTER_K is set; skipping the center-k checks"
+        else
+            r = compatible_rhs(144; salt=3)                 # mean zero
+            P = ApxChol.aspreconditioner(ApxCholSolver(grid_laplacian(12, 12; shift=0.1)))
+            z = [P \ r for _ in 1:10]
+            @test all(zi -> bits(zi) == bits(z[1]), z)
+            P = ApxChol.aspreconditioner(ApxCholSolver(grid_laplacian(12, 12)))
+            z = [P \ r for _ in 1:10]                       # the 10th centres (K = 10)
+            @test all(i -> bits(z[i]) == bits(z[1]), 1:9)
+            d = z[10] - z[1]
+            @test norm(d) > 0
+            @test norm(d .- sum(d) / length(d)) <= 1e-10 * norm(z[1])
+        end
     end
 
     @testset "factor handles: lifetime, finalizers and threads" begin

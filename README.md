@@ -68,8 +68,10 @@ L, perm = ApxChol.factor(F)         # a factor always keeps its values
 ```
 
 Each solver adopts its own copy of the factor, so factors and solvers can be
-closed in any order. `ApxCholSolver(A2, F)` takes only the solve keywords
-(`rtol`, `maxiter`, `stagnation_window`, `threads`, `keep_factor`, `backend`);
+closed in any order. A factor carries only factorization options.
+`ApxCholSolver(A2, F)` takes only the solve keywords (`rtol`, `maxiter`,
+`stagnation_window`, `threads`, `keep_factor`, `backend`; apxchol's defaults
+unless given);
 `A2` is validated like any operator and must have `F`'s size. A Laplacian
 factor refuses an SDDM operator (`ApxCholError(:invalid_argument)`); an SDDM
 factor may precondition a Laplacian, whose solution is then not centred.
@@ -114,6 +116,11 @@ using Krylov
 P = ApxChol.aspreconditioner(S)        # ldiv!(y, P, x) applies M⁻¹ once
 x, stats = Krylov.cg(A, b; M=P, ldiv=true)
 ```
+
+With an SDDM factor `P` is a fixed linear map. With a Laplacian factor it is
+fixed only up to a constant vector: the CPU backend centres every 10th
+application (apxchol's center-k schedule, `APXCHOL_CENTER_K`), so repeated
+applications of a mean-zero `r` agree up to a constant.
 
 ### Introspection
 

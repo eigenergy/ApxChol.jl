@@ -355,7 +355,7 @@ serialized.
 mutable struct ApxCholFactor
     ptr::Ptr{Cvoid}
     const n::Int
-    const options::COptions        # the factorization options it was built with
+    const options::COptions        # factorization options only (solve fields: defaults)
     const lock::ReentrantLock
 end
 
@@ -430,7 +430,17 @@ function ApxCholFactor(S::ApxCholSolver)
               ptr, handle, buffer, length(buffer))
     end
     check(status, buffer)
-    return finalizer(destroy!, ApxCholFactor(handle[], S.n, S.options, ReentrantLock()))
+    return finalizer(destroy!, ApxCholFactor(handle[], S.n, factorization_options(S.options),
+                                             ReentrantLock()))
+end
+
+# A factor carries only factorization options: `o`'s, with apxchol's defaults
+# for everything a solve reads, so solvers adopting it start from those.
+function factorization_options(o::COptions)
+    d = default_options()
+    return COptions(d.struct_size, d.backend, d.tol, d.max_iter, d.stagnation_window, o.seed,
+                    o.threads, o.sampler, o.partitioner, o.storage, d.keep_factor_values,
+                    o.degree_quantile, o.exact_clique_max_degree, o.omp_threshold)
 end
 
 # The finalizer runs only once the handle is unreachable, so no call can race it.
@@ -472,10 +482,12 @@ end
 Base.show(io::IO, F::ApxCholFactor) =
     print(io, "ApxCholFactor(", F.n, "×", F.n, isopen(F) ? "" : ", closed", ")")
 
+# Every C call on a handle goes through here: under its lock, and with the
+# handle object rooted so its finalizer cannot run during the call.
 function with_handle(f, H::Handle)
     lock(H.lock) do
         H.ptr == C_NULL && throw(ArgumentError("the $(handle_name(H)) has been closed"))
-        f(H.ptr)
+        GC.@preserve H f(H.ptr)
     end
 end
 
@@ -596,8 +608,15 @@ end
     apply!(z, S::ApxCholSolver, r) -> z
 
 One preconditioner application `z = M⁻¹ r` (forward and backward triangular
-solve with the approximate factor). For a Laplacian, `z` is defined up to the
-constant vector. `z` and `r` may be the same vector.
+solve with the approximate factor). `z` and `r` may be the same vector.
+
+With an SDDM factor (`stats(S).sddm`) this is a fixed linear map. With a
+Laplacian factor `z` is defined only up to a constant vector: `:metal`
+centres input and output on every application, so the same `r` gives the
+same `z`; `:cpu` centres them only on every K-th application of the solver's
+count (apxchol's center-k schedule, `APXCHOL_CENTER_K`, default 10; every
+solve restarts the count), so repeated applications of a mean-zero `r` agree
+up to a constant vector.
 """
 function apply!(z::Vector{Float64}, S::ApxCholSolver, r::AbstractVector{<:Real})
     check_length(r, S.n, "r"); check_length(z, S.n, "z")
@@ -618,7 +637,9 @@ end
 
 The preconditioner `M ≈ A` of an [`ApxCholSolver`](@ref):
 `ldiv!(y, P, x)`, `ldiv!(P, x)` and `P \\ x` apply `M⁻¹` once. Use it as
-`Krylov.cg(A, b; M=P, ldiv=true)` or `IterativeSolvers.cg(A, b; Pl=P)`.
+`Krylov.cg(A, b; M=P, ldiv=true)` or `IterativeSolvers.cg(A, b; Pl=P)`. It is
+a fixed linear map for an SDDM factor; for a Laplacian factor only up to a
+constant vector (see [`ApxChol.apply!`](@ref)).
 """
 struct ApxCholPreconditioner
     solver::ApxCholSolver
