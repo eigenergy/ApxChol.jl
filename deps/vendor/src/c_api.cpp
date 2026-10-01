@@ -367,11 +367,21 @@ void export_arrays(const apxchol::factorization& F, std::size_t n, std::int32_t 
             perm[v] = static_cast<std::int64_t>(F.perm[v]) + index_base;
 }
 
-/// Shared by the solver and factor stats (struct_size already checked).
-void write_stats(const apxchol::factorization& F, apxchol_backend backend, Eigen::Index n,
-                 double setup_seconds, std::int32_t setup_max_threads, apxchol_stats* stats) {
+/// The stats calls' prologue: a mismatched struct_size leaves *stats untouched
+/// and is the status; a matching one is zeroed (struct_size kept) before
+/// anything else can fail.
+apxchol_status begin_stats(apxchol_stats* stats) noexcept {
+    if (stats == nullptr) return APXCHOL_STATUS_INVALID_ARGUMENT;
+    const apxchol_status s = check_struct_size(stats->struct_size, sizeof(apxchol_stats));
+    if (s != APXCHOL_STATUS_SUCCESS) return s;
     *stats = apxchol_stats{};
     stats->struct_size = sizeof(apxchol_stats);
+    return APXCHOL_STATUS_SUCCESS;
+}
+
+/// Shared by the solver and factor stats (after begin_stats).
+void write_stats(const apxchol::factorization& F, apxchol_backend backend, Eigen::Index n,
+                 double setup_seconds, std::int32_t setup_max_threads, apxchol_stats* stats) {
     stats->backend = backend;
     stats->n = static_cast<int64_t>(n);
     stats->factor_nnz = static_cast<int64_t>(F.L.nonZeros());
@@ -672,9 +682,9 @@ apxchol_status apxchol_solver_apply(apxchol_solver* solver, const double* r, dou
 }
 
 apxchol_status apxchol_solver_stats(const apxchol_solver* solver, apxchol_stats* stats) {
-    if (solver == nullptr || stats == nullptr) return APXCHOL_STATUS_INVALID_ARGUMENT;
-    const apxchol_status s = check_struct_size(stats->struct_size, sizeof(apxchol_stats));
+    const apxchol_status s = begin_stats(stats);
     if (s != APXCHOL_STATUS_SUCCESS) return s;
+    if (solver == nullptr) return APXCHOL_STATUS_INVALID_ARGUMENT;
     write_stats(solver->factor(), solver->options.backend, solver->n, solver->setup_seconds,
                 solver->setup_max_threads, stats);
     return APXCHOL_STATUS_SUCCESS;
@@ -737,9 +747,9 @@ apxchol_status apxchol_factor_create(int64_t n, const int64_t* colptr, const int
 void apxchol_factor_destroy(apxchol_factor* factor) { delete factor; }
 
 apxchol_status apxchol_factor_stats(const apxchol_factor* factor, apxchol_stats* stats) {
-    if (factor == nullptr || stats == nullptr) return APXCHOL_STATUS_INVALID_ARGUMENT;
-    const apxchol_status s = check_struct_size(stats->struct_size, sizeof(apxchol_stats));
+    const apxchol_status s = begin_stats(stats);
     if (s != APXCHOL_STATUS_SUCCESS) return s;
+    if (factor == nullptr) return APXCHOL_STATUS_INVALID_ARGUMENT;
     write_stats(factor->F, APXCHOL_BACKEND_CPU, static_cast<Eigen::Index>(factor->F.perm.size()),
                 factor->setup_seconds, factor->setup_max_threads, stats);
     return APXCHOL_STATUS_SUCCESS;

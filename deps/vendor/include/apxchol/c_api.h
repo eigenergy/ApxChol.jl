@@ -6,10 +6,12 @@
  * NOT_CONVERGED (1) both write every requested output: NOT_CONVERGED means the
  * solution and info were written but the relative residual is not below tol.
  * It is never a relaxed acceptance. Every other status is an error: a call
- * that returns a new handle sets it to NULL, info/stats outputs are zeroed
- * except struct_size, and other outputs are unspecified. When error_message
- * is non-NULL and error_capacity > 0, a NUL-terminated (possibly truncated)
- * message is written ("" on SUCCESS).
+ * that returns a new handle sets it to NULL, an info or stats output whose
+ * struct_size matches is zeroed except struct_size (one whose struct_size
+ * does not match is left untouched and decides the status), and other
+ * outputs are unspecified. When error_message is non-NULL and
+ * error_capacity > 0, a NUL-terminated (possibly truncated) message is
+ * written ("" on SUCCESS).
  *
  * No C++ exception crosses this boundary. Conditions that terminate the
  * process instead of returning a status: a factor or pool offset beyond
@@ -103,7 +105,11 @@ typedef struct apxchol_options {
     double degree_quantile;           /* < 0: chosen by route (factor_options.h) */
     uint64_t exact_clique_max_degree;
     uint64_t omp_threshold;           /* min active vertices before the factorization
-                                         engages OpenMP (factor_options.h) */
+                                         engages OpenMP, and the selection size kept
+                                         whatever its yield (factor_options.h); 0:
+                                         OpenMP at every size, that safeguard off.
+                                         A set APXCHOL_OMP_THRESHOLD overrides it,
+                                         as for every apxchol entry point */
 } apxchol_options;
 
 /* 32 bytes; the caller sets struct_size. */
@@ -172,8 +178,13 @@ APXCHOL_C_API apxchol_status apxchol_solver_solve_block(
     double tol, int32_t max_iter, int64_t* iterations, double* relative_residuals,
     int32_t* converged, char* error_message, size_t error_capacity);
 
-/* One preconditioner application z = M^{-1} r. For a Laplacian, z is defined
- * up to the constant null-space component. */
+/* One preconditioner application z = M^{-1} r. With an SDDM factor
+ * (stats.sddm = 1) it is a fixed linear map. With a Laplacian factor z is
+ * defined up to a constant vector: METAL centres input and output on every
+ * application, so the same r gives the same z; CPU centres them only on
+ * every K-th application of the solver's count (APXCHOL_GROUND=center-k,
+ * K = APXCHOL_CENTER_K, default 10; every solve restarts the count), so for
+ * a mean-zero r repeated applications agree up to a constant vector. */
 APXCHOL_C_API apxchol_status apxchol_solver_apply(
     apxchol_solver* solver, const double* r, double* z,
     char* error_message, size_t error_capacity);
