@@ -7,7 +7,9 @@ Laplacian, SDDM and lumpable M-matrix systems, through apxchol's C ABI.
 
 Factor once with [`ApxCholSolver`](@ref), then [`solve`](@ref) any number of
 right-hand sides; [`aspreconditioner`](@ref) exposes one preconditioner
-application for external Krylov solvers.
+application for external Krylov solvers. An [`ApxCholFactor`](@ref) carries one
+factorization to any number of solvers, including solvers for a different
+operator of the same size (factor reuse).
 """
 module ApxChol
 
@@ -16,8 +18,8 @@ using Libdl
 using LinearAlgebra
 using SparseArrays
 
-export ApxCholSolver, SolveResult, BlockSolveResult, ApxCholError, NotConvergedError,
-       solve, solve!
+export ApxCholSolver, ApxCholFactor, SolveResult, BlockSolveResult, ApxCholError,
+       NotConvergedError, solve, solve!
 
 const libapxchol = normpath(joinpath(@__DIR__, "..", "deps", "usr", "lib",
                                      Sys.isapple() ? "libapxchol.dylib" : "libapxchol.so"))
@@ -40,6 +42,7 @@ struct COptions
     keep_factor_values::Int32
     degree_quantile::Float64
     exact_clique_max_degree::UInt64
+    omp_threshold::UInt64
 end
 
 struct CSolveInfo
@@ -245,10 +248,18 @@ int32(value::Integer, what) =
     typemin(Int32) <= value <= typemax(Int32) ? Int32(value) :
     throw(ArgumentError("$what = $value does not fit in Int32"))
 
-function make_options(; rtol, maxiter, stagnation_window, seed, threads, sampler,
-                      partitioner, storage, degree_quantile, exact_clique_max_degree,
-                      keep_factor, backend)
-    d = default_options()
+nonnegative(value, what) =
+    value >= 0 ? UInt64(value) : throw(ArgumentError("$what must be non-negative"))
+
+# `base` (apxchol's defaults, or a factor's options) with every non-`nothing`
+# keyword applied.
+function make_options(base::COptions=default_options(); rtol=nothing, maxiter=nothing,
+                      stagnation_window=nothing, seed=nothing, threads::Integer, sampler=nothing,
+                      partitioner=nothing, storage=nothing, degree_quantile=nothing,
+                      exact_clique_max_degree=nothing, omp_threshold=nothing,
+                      keep_factor::Bool, backend::Symbol)
+    d = base
+    threads >= 0 || throw(ArgumentError("threads must be non-negative"))
     return COptions(
         d.struct_size,
         enum_code(BACKENDS, backend, "backend"),
@@ -267,14 +278,23 @@ function make_options(; rtol, maxiter, stagnation_window, seed, threads, sampler
         Int32(keep_factor),
         degree_quantile === nothing ? d.degree_quantile : Float64(degree_quantile),
         exact_clique_max_degree === nothing ? d.exact_clique_max_degree :
-            (exact_clique_max_degree >= 0 ? UInt64(exact_clique_max_degree) :
-             throw(ArgumentError("exact_clique_max_degree must be non-negative"))))
+            nonnegative(exact_clique_max_degree, "exact_clique_max_degree"),
+        omp_threshold === nothing ? d.omp_threshold : nonnegative(omp_threshold, "omp_threshold"))
 end
 
-# ── Solver handle ────────────────────────────────────────────────────────────
+# A square, non-empty `SparseMatrixCSC{Float64,Int64}` view or copy of `A`.
+function operator_csc(A::SparseMatrixCSC)
+    n = LinearAlgebra.checksquare(A)
+    n >= 1 || throw(ArgumentError("A must have at least one row"))
+    return n, A isa SparseMatrixCSC{Float64,Int64} ? A : SparseMatrixCSC{Float64,Int64}(A)
+end
+
+# ── Solver and factor handles ────────────────────────────────────────────────
 
 """
     ApxCholSolver(A::SparseMatrixCSC; kwargs...)
+    ApxCholSolver(A::SparseMatrixCSC, F::ApxCholFactor; rtol, maxiter, stagnation_window,
+                  threads=0, keep_factor=false, backend=:cpu)
 
 Factorize `A` once for repeated solves. `A` must be a Laplacian, SDDM or
 lumpable M-matrix (symmetric, positive diagonal, non-positive off-diagonals
@@ -288,11 +308,22 @@ Keywords (`nothing` selects apxchol's default):
 - `seed` (42), `sampler` (`:gks` or `:trace_cycle`), `partitioner`
   (`:block_greedy`, `:priority_greedy`, `:baumann_kyng`), `storage`
   (`:vec_pool_aos`, `:vec`, `:bstr`), `degree_quantile`,
-  `exact_clique_max_degree`: factorization options;
+  `exact_clique_max_degree`, `omp_threshold` (2000: active vertices before the
+  factorization engages OpenMP): factorization options;
 - `threads = 0`: OpenMP threads for every call on this solver (0 inherits the
   calling thread's setting);
-- `keep_factor = false`: retain the factor values for [`ApxChol.factor`](@ref);
+- `keep_factor = false`: retain the factor values for [`ApxChol.factor`](@ref)
+  and [`ApxCholFactor(S)`](@ref ApxCholFactor);
 - `backend = :cpu`.
+
+The second form adopts a copy of the factorization `F` instead of factorizing
+(factor reuse): `A` may differ from the matrix `F` was built from, but must
+have its size. It takes no factorization keywords. A Laplacian factor (rank
+n − 1, centred solutions) refuses an SDDM operator; an SDDM factor may
+precondition a Laplacian, whose solution is then not centred. On another
+operator, convergence depends on how close it is to the factor's; check
+`converged`. The first form is `ApxCholFactor(A; ...)` followed by the second
+on the same matrix with the same keywords.
 
 The solver holds native memory released by its finalizer or by `close`.
 Calls on one solver are serialized; distinct solvers may be used concurrently.
@@ -304,18 +335,42 @@ mutable struct ApxCholSolver
     const lock::ReentrantLock
 end
 
+"""
+    ApxCholFactor(A::SparseMatrixCSC; seed, sampler, partitioner, storage,
+                  degree_quantile, exact_clique_max_degree, omp_threshold, threads=0)
+    ApxCholFactor(S::ApxCholSolver)
+
+One approximate factorization, without a solver, for any number of
+[`ApxCholSolver(A, F)`](@ref ApxCholSolver) to adopt. The first form factorizes
+`A` with the factorization keywords of `ApxCholSolver` (and `threads` for this
+call). The second copies the factor of a solver created with
+`keep_factor=true` (`ApxCholError(:no_factor_values)` otherwise).
+
+A factor always keeps its values: [`ApxChol.factor`](@ref) and
+[`ApxChol.stats`](@ref) work on it. Each solver adopts its own copy, so a
+factor and its solvers can be closed in any order. The factor holds native
+memory released by its finalizer or by `close`; calls on one factor are
+serialized.
+"""
+mutable struct ApxCholFactor
+    ptr::Ptr{Cvoid}
+    const n::Int
+    const options::COptions        # the factorization options it was built with
+    const lock::ReentrantLock
+end
+
+handle_name(::ApxCholSolver) = "ApxCholSolver"
+handle_name(::ApxCholFactor) = "ApxCholFactor"
+
 function ApxCholSolver(A::SparseMatrixCSC; rtol=nothing, maxiter=nothing,
                        stagnation_window=nothing, seed=nothing, threads::Integer=0,
                        sampler=nothing, partitioner=nothing, storage=nothing,
                        degree_quantile=nothing, exact_clique_max_degree=nothing,
-                       keep_factor::Bool=false, backend::Symbol=:cpu)
-    n = LinearAlgebra.checksquare(A)
-    n >= 1 || throw(ArgumentError("A must have at least one row"))
-    threads >= 0 || throw(ArgumentError("threads must be non-negative"))
+                       omp_threshold=nothing, keep_factor::Bool=false, backend::Symbol=:cpu)
+    n, M = operator_csc(A)
     options = make_options(; rtol, maxiter, stagnation_window, seed, threads, sampler,
                            partitioner, storage, degree_quantile, exact_clique_max_degree,
-                           keep_factor, backend)
-    M = A isa SparseMatrixCSC{Float64,Int64} ? A : SparseMatrixCSC{Float64,Int64}(A)
+                           omp_threshold, keep_factor, backend)
     handle = Ref{Ptr{Cvoid}}(C_NULL)
     buffer = zeros(UInt8, ERROR_CAPACITY)
     status = GC.@preserve M ccall(
@@ -324,12 +379,61 @@ function ApxCholSolver(A::SparseMatrixCSC; rtol=nothing, maxiter=nothing,
          Ref{Ptr{Cvoid}}, Ptr{UInt8}, Csize_t),
         n, M.colptr, M.rowval, M.nzval, 1, options, handle, buffer, length(buffer))
     check(status, buffer)
-    solver = ApxCholSolver(handle[], n, options, ReentrantLock())
-    finalizer(destroy!, solver)
-    return solver
+    return finalizer(destroy!, ApxCholSolver(handle[], n, options, ReentrantLock()))
 end
 
-# The finalizer runs only once the solver is unreachable, so no call can race it.
+function ApxCholSolver(A::SparseMatrixCSC, F::ApxCholFactor; rtol=nothing, maxiter=nothing,
+                       stagnation_window=nothing, threads::Integer=0,
+                       keep_factor::Bool=false, backend::Symbol=:cpu)
+    n, M = operator_csc(A)
+    n == F.n || throw(DimensionMismatch("A is $n×$n, the factor $(F.n)×$(F.n)"))
+    # The factor's factorization options, so `options(S)` describes its factor.
+    options = make_options(F.options; rtol, maxiter, stagnation_window, threads, keep_factor,
+                           backend)
+    handle = Ref{Ptr{Cvoid}}(C_NULL)
+    buffer = zeros(UInt8, ERROR_CAPACITY)
+    status = with_handle(F) do fptr
+        GC.@preserve M ccall(
+            (:apxchol_solver_create_from_factor, libapxchol), Int32,
+            (Int64, Ptr{Int64}, Ptr{Int64}, Ptr{Float64}, Int32, Ptr{Cvoid}, Ref{COptions},
+             Ref{Ptr{Cvoid}}, Ptr{UInt8}, Csize_t),
+            n, M.colptr, M.rowval, M.nzval, 1, fptr, options, handle, buffer, length(buffer))
+    end
+    check(status, buffer)
+    return finalizer(destroy!, ApxCholSolver(handle[], n, options, ReentrantLock()))
+end
+
+function ApxCholFactor(A::SparseMatrixCSC; seed=nothing, threads::Integer=0, sampler=nothing,
+                       partitioner=nothing, storage=nothing, degree_quantile=nothing,
+                       exact_clique_max_degree=nothing, omp_threshold=nothing)
+    n, M = operator_csc(A)
+    options = make_options(; seed, threads, sampler, partitioner, storage, degree_quantile,
+                           exact_clique_max_degree, omp_threshold, keep_factor=false,
+                           backend=:cpu)
+    handle = Ref{Ptr{Cvoid}}(C_NULL)
+    buffer = zeros(UInt8, ERROR_CAPACITY)
+    status = GC.@preserve M ccall(
+        (:apxchol_factor_create, libapxchol), Int32,
+        (Int64, Ptr{Int64}, Ptr{Int64}, Ptr{Float64}, Int32, Ref{COptions},
+         Ref{Ptr{Cvoid}}, Ptr{UInt8}, Csize_t),
+        n, M.colptr, M.rowval, M.nzval, 1, options, handle, buffer, length(buffer))
+    check(status, buffer)
+    return finalizer(destroy!, ApxCholFactor(handle[], n, options, ReentrantLock()))
+end
+
+function ApxCholFactor(S::ApxCholSolver)
+    handle = Ref{Ptr{Cvoid}}(C_NULL)
+    buffer = zeros(UInt8, ERROR_CAPACITY)
+    status = with_handle(S) do ptr
+        ccall((:apxchol_solver_copy_factor, libapxchol), Int32,
+              (Ptr{Cvoid}, Ref{Ptr{Cvoid}}, Ptr{UInt8}, Csize_t),
+              ptr, handle, buffer, length(buffer))
+    end
+    check(status, buffer)
+    return finalizer(destroy!, ApxCholFactor(handle[], S.n, S.options, ReentrantLock()))
+end
+
+# The finalizer runs only once the handle is unreachable, so no call can race it.
 function destroy!(S::ApxCholSolver)
     if S.ptr != C_NULL
         ccall((:apxchol_solver_destroy, libapxchol), Cvoid, (Ptr{Cvoid},), S.ptr)
@@ -337,28 +441,41 @@ function destroy!(S::ApxCholSolver)
     end
     return nothing
 end
+function destroy!(F::ApxCholFactor)
+    if F.ptr != C_NULL
+        ccall((:apxchol_factor_destroy, libapxchol), Cvoid, (Ptr{Cvoid},), F.ptr)
+        F.ptr = C_NULL
+    end
+    return nothing
+end
+
+const Handle = Union{ApxCholSolver,ApxCholFactor}
 
 """
     close(S::ApxCholSolver)
+    close(F::ApxCholFactor)
 
-Release the solver's native memory now. Further use throws; closing twice is
-a no-op.
+Release the handle's native memory now. Further use throws; closing twice is
+a no-op. Solvers adopted from a factor keep working after it is closed.
 """
-Base.close(S::ApxCholSolver) = lock(() -> destroy!(S), S.lock)
-Base.isopen(S::ApxCholSolver) = S.ptr != C_NULL
-Base.size(S::ApxCholSolver) = (S.n, S.n)
-Base.size(S::ApxCholSolver, d::Integer) = d <= 2 ? S.n : 1
+Base.close(H::Handle) = lock(() -> destroy!(H), H.lock)
+Base.isopen(H::Handle) = H.ptr != C_NULL
+Base.size(H::Handle) = (H.n, H.n)
+Base.size(H::Handle, d::Integer) = d <= 2 ? H.n : 1
 Base.eltype(::Type{ApxCholSolver}) = Float64
+Base.eltype(::Type{ApxCholFactor}) = Float64
 
 function Base.show(io::IO, S::ApxCholSolver)
     print(io, "ApxCholSolver(", S.n, "×", S.n, ", ",
           enum_symbol(BACKENDS, S.options.backend), isopen(S) ? "" : ", closed", ")")
 end
+Base.show(io::IO, F::ApxCholFactor) =
+    print(io, "ApxCholFactor(", F.n, "×", F.n, isopen(F) ? "" : ", closed", ")")
 
-function with_handle(f, S::ApxCholSolver)
-    lock(S.lock) do
-        S.ptr == C_NULL && throw(ArgumentError("the ApxCholSolver has been closed"))
-        f(S.ptr)
+function with_handle(f, H::Handle)
+    lock(H.lock) do
+        H.ptr == C_NULL && throw(ArgumentError("the $(handle_name(H)) has been closed"))
+        f(H.ptr)
     end
 end
 
@@ -524,20 +641,30 @@ Base.:\(P::ApxCholPreconditioner, x::AbstractVector{<:Real}) =
 
 # ── Introspection ────────────────────────────────────────────────────────────
 
+c_stats(::ApxCholSolver, ptr, out) =
+    ccall((:apxchol_solver_stats, libapxchol), Int32, (Ptr{Cvoid}, Ref{CStats}), ptr, out)
+c_stats(::ApxCholFactor, ptr, out) =
+    ccall((:apxchol_factor_stats, libapxchol), Int32, (Ptr{Cvoid}, Ref{CStats}), ptr, out)
+
 """
     ApxChol.stats(S::ApxCholSolver) -> NamedTuple
+    ApxChol.stats(F::ApxCholFactor) -> NamedTuple
 
 `backend`, `n`, `factor_nnz` (entries of L including its diagonal),
 `lumped_offdiag` (positive off-diagonals lumped onto the diagonal, two per
-symmetric pair), `rounds`, `peak_graph_bytes`, `setup_seconds`, `sddm`
-(`false` for a Laplacian) and `setup_max_threads`.
+symmetric pair, in the matrix the factor was built from), `rounds`,
+`peak_graph_bytes`, `setup_seconds` (wall time of the call that created the
+handle; a copied factor reports its solver's), `sddm` (`false` for a
+Laplacian factor) and `setup_max_threads`. A solver that adopted a factor
+reports the factor's fields with its own setup time; a factor reports
+`backend = :cpu` (factorizations run on the host).
 """
-function stats(S::ApxCholSolver)
+function stats(H::Handle)
     out = Ref(CStats())
-    status = with_handle(S) do ptr
-        ccall((:apxchol_solver_stats, libapxchol), Int32, (Ptr{Cvoid}, Ref{CStats}), ptr, out)
+    status = with_handle(H) do ptr
+        c_stats(H, ptr, out)
     end
-    status == 0 || throw(ApxCholError(status_symbol(status), "apxchol_solver_stats failed"))
+    status == 0 || throw(ApxCholError(status_symbol(status), "apxchol stats failed"))
     s = out[]
     return (backend=enum_symbol(BACKENDS, s.backend), n=Int(s.n), factor_nnz=Int(s.factor_nnz),
             lumped_offdiag=Int(s.lumped_offdiag), rounds=Int(s.rounds),
@@ -548,7 +675,8 @@ end
 """
     ApxChol.options(S::ApxCholSolver) -> NamedTuple
 
-The resolved options the solver was created with.
+The resolved options the solver was created with (for a solver that adopted
+a factor, the factor's factorization options).
 """
 function options(S::ApxCholSolver)
     o = S.options
@@ -558,24 +686,30 @@ function options(S::ApxCholSolver)
             partitioner=enum_symbol(PARTITIONERS, o.partitioner),
             storage=enum_symbol(STORAGES, o.storage), keep_factor=o.keep_factor_values == 1,
             degree_quantile=o.degree_quantile,
-            exact_clique_max_degree=Int(o.exact_clique_max_degree))
+            exact_clique_max_degree=Int(o.exact_clique_max_degree),
+            omp_threshold=Int(o.omp_threshold))
 end
 
-function export_factor(S::ApxCholSolver, with_values::Bool)
-    nnz_l = stats(S).factor_nnz
-    colptr = with_values ? Vector{Int64}(undef, S.n + 1) : nothing
+c_export(::ApxCholSolver, ptr, colptr, rowval, nzval, perm, buffer) =
+    ccall((:apxchol_solver_export_factor, libapxchol), Int32,
+          (Ptr{Cvoid}, Int32, Ptr{Int64}, Ptr{Int64}, Ptr{Float64}, Ptr{Int64}, Ptr{UInt8},
+           Csize_t), ptr, 1, colptr, rowval, nzval, perm, buffer, length(buffer))
+c_export(::ApxCholFactor, ptr, colptr, rowval, nzval, perm, buffer) =
+    ccall((:apxchol_factor_export, libapxchol), Int32,
+          (Ptr{Cvoid}, Int32, Ptr{Int64}, Ptr{Int64}, Ptr{Float64}, Ptr{Int64}, Ptr{UInt8},
+           Csize_t), ptr, 1, colptr, rowval, nzval, perm, buffer, length(buffer))
+
+function export_factor(H::Handle, with_values::Bool)
+    nnz_l = stats(H).factor_nnz
+    colptr = with_values ? Vector{Int64}(undef, H.n + 1) : nothing
     rowval = with_values ? Vector{Int64}(undef, nnz_l) : nothing
     nzval = with_values ? Vector{Float64}(undef, nnz_l) : nothing
-    perm = Vector{Int64}(undef, S.n)
+    perm = Vector{Int64}(undef, H.n)
     ptr_or_null(v) = v === nothing ? C_NULL : pointer(v)
     buffer = zeros(UInt8, ERROR_CAPACITY)
-    status = with_handle(S) do ptr
-        GC.@preserve colptr rowval nzval perm ccall(
-            (:apxchol_solver_export_factor, libapxchol), Int32,
-            (Ptr{Cvoid}, Int32, Ptr{Int64}, Ptr{Int64}, Ptr{Float64}, Ptr{Int64},
-             Ptr{UInt8}, Csize_t),
-            ptr, 1, ptr_or_null(colptr), ptr_or_null(rowval), ptr_or_null(nzval), perm,
-            buffer, length(buffer))
+    status = with_handle(H) do ptr
+        GC.@preserve colptr rowval nzval c_export(
+            H, ptr, ptr_or_null(colptr), ptr_or_null(rowval), ptr_or_null(nzval), perm, buffer)
     end
     check(status, buffer)
     return colptr, rowval, nzval, perm
@@ -583,22 +717,25 @@ end
 
 """
     ApxChol.factor(S::ApxCholSolver) -> (L, perm)
+    ApxChol.factor(F::ApxCholFactor) -> (L, perm)
 
 The approximate factor: lower-triangular `L::SparseMatrixCSC{Float64,Int64}`
 in the elimination order (fp32 values widened) and `perm`, where `perm[v]` is
 vertex `v`'s elimination position, so `A[p, p] ≈ L * L'` for
-`p = invperm(perm)`. Requires `keep_factor=true`.
+`p = invperm(perm)`. A solver requires `keep_factor=true`; a factor always has
+its values.
 """
-function factor(S::ApxCholSolver)
-    colptr, rowval, nzval, perm = export_factor(S, true)
-    return SparseMatrixCSC(S.n, S.n, colptr, rowval, nzval), perm
+function factor(H::Handle)
+    colptr, rowval, nzval, perm = export_factor(H, true)
+    return SparseMatrixCSC(H.n, H.n, colptr, rowval, nzval), perm
 end
 
 """
     ApxChol.permutation(S::ApxCholSolver) -> Vector{Int}
+    ApxChol.permutation(F::ApxCholFactor) -> Vector{Int}
 
 The elimination order (`perm[v]` = position of vertex `v`); always available.
 """
-permutation(S::ApxCholSolver) = export_factor(S, false)[4]
+permutation(H::Handle) = export_factor(H, false)[4]
 
 end

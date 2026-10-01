@@ -2,4 +2,4 @@
 # The fork's main (the branch proposing the C ABI and the Metal backend upstream); repin to
 # AlgOptGroup/apxchol once that branch is merged.
 repository=https://github.com/samtalki/apxchol.git
-revision=462bc39097d3bd93931a4cd9d42b61e834062869
+revision=15ec8abce3ab40215f0e1a72a3df8204b6526b5f

@@ -57,6 +57,26 @@ Laplacian systems return the min-norm solution (`sum(x) ≈ 0`). The
 right-hand side must be compatible with every connected component; it is not
 projected.
 
+### Factor reuse
+
+```julia
+F = ApxCholFactor(A; seed=7)        # factorize once, no solver
+S1 = ApxCholSolver(A, F)            # A preconditioned by F
+S2 = ApxCholSolver(A2, F; rtol=1e-10)  # another operator of the same size, same factor
+F2 = ApxCholFactor(S)               # the factor of a solver made with keep_factor=true
+L, perm = ApxChol.factor(F)         # a factor always keeps its values
+```
+
+Each solver adopts its own copy of the factor, so factors and solvers can be
+closed in any order. `ApxCholSolver(A2, F)` takes only the solve keywords
+(`rtol`, `maxiter`, `stagnation_window`, `threads`, `keep_factor`, `backend`);
+`A2` is validated like any operator and must have `F`'s size. A Laplacian
+factor refuses an SDDM operator (`ApxCholError(:invalid_argument)`); an SDDM
+factor may precondition a Laplacian, whose solution is then not centred.
+Convergence on another operator depends on how close it is: check
+`r.converged`. On the factor's own matrix, `ApxCholSolver(A, ApxCholFactor(A))`
+is the solver `ApxCholSolver(A)` builds.
+
 ### Convergence
 
 `solve` and `solve!` never throw on non-convergence: check `r.converged`
@@ -80,6 +100,7 @@ Keyword arguments of `ApxCholSolver` (and of the one-shot `solve(A, b; ...)`).
 | `storage` | `:vec_pool_aos` | also `:vec`, `:bstr` |
 | `degree_quantile` | by route | independent-set degree cap (see apxchol's `factor_options.h`) |
 | `exact_clique_max_degree` | `0` | exact cliques up to this degree |
+| `omp_threshold` | `2000` | active vertices before the factorization engages OpenMP |
 | `keep_factor` | `false` | retain the factor for `ApxChol.factor` |
 | `backend` | `:cpu` | `:metal`: Apple-GPU block PCG (Apple silicon) |
 
@@ -97,10 +118,11 @@ x, stats = Krylov.cg(A, b; M=P, ldiv=true)
 ### Introspection
 
 `ApxChol.stats(S)` reports the factor size, lumped entries, rounds, setup
-time and whether the operator is SDDM. `ApxChol.factor(S)` returns `(L, perm)`
+time and whether the factor is SDDM. `ApxChol.factor(S)` returns `(L, perm)`
 with `A[p, p] ≈ L * L'` for `p = invperm(perm)` (requires `keep_factor=true`).
 `ApxChol.permutation(S)`, `ApxChol.options(S)` and `ApxChol.version()` are
-also available.
+also available. `stats`, `factor` and `permutation` also take an
+`ApxCholFactor`.
 
 ## Threads and concurrency
 
@@ -118,8 +140,8 @@ also available.
   address. Julia tasks run on their own stacks, so concurrent solves on
   several Julia threads crashed on Julia 1.10. Load ApxChol before anything
   else starts OpenMP work.
-- A solver holds native memory, released by its finalizer or by
-  `close(S)`.
+- A solver or factor holds native memory, released by its finalizer or by
+  `close`. Calls on one factor are serialized by a lock, as on a solver.
 
 ## Limits
 
