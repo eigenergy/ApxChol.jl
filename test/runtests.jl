@@ -237,12 +237,16 @@ relres(A, x, b) = norm(A * x - b) / norm(b)
     end
 
     @testset "backends" begin
-        if ApxChol.backend_available(:metal)
-            @info "Metal backend available; its tests live in test/metal.jl"
-        else
+        if !ApxChol.backend_available(:metal)
             e = try ApxCholSolver(grid_laplacian(3, 3); backend=:metal); nothing catch err; err end
             @test e isa ApxCholError && e.status == :unsupported
         end
         @test_throws ArgumentError ApxCholSolver(grid_laplacian(3, 3); backend=:cuda)
+    end
+
+    if ApxChol.backend_available(:metal)
+        include("metal.jl")
+    else
+        @info "Metal backend unavailable in this build or on this machine; skipping test/metal.jl"
     end
 end
