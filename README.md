@@ -81,7 +81,7 @@ Keyword arguments of `ApxCholSolver` (and of the one-shot `solve(A, b; ...)`).
 | `degree_quantile` | by route | independent-set degree cap (see apxchol's `factor_options.h`) |
 | `exact_clique_max_degree` | `0` | exact cliques up to this degree |
 | `keep_factor` | `false` | retain the factor for `ApxChol.factor` |
-| `backend` | `:cpu` | `:metal` needs an apxchol build with the Metal backend |
+| `backend` | `:cpu` | `:metal`: Apple-GPU block PCG (Apple silicon) |
 
 `solve`, `solve!` and the block forms also take `rtol`, `maxiter` and
 `x0`/`X0` per call.
@@ -127,20 +127,38 @@ also available.
 - Factors larger than 2³² − 1 entries abort the process. Use an apxchol build
   with `APXCHOL_64BIT_EDGE_INDICES=ON` for those.
 
-## Pinned revision and vendored C ABI
+## Pinned revision
 
-`deps/apxchol.pin` names the apxchol revision the package builds. Upstream
-apxchol does not ship its C ABI yet, so `deps/vendor/` carries byte-identical
-copies of `c_api.h`/`c_api.cpp` from the branch proposing it (see
-`deps/vendor/PROVENANCE`). On macOS, `deps/compat/` patches over the pinned
-revision's Linux-only `madvise` calls. Both directories are removed once the
-package builds against an apxchol revision that includes these changes.
+`deps/apxchol.pin` names the apxchol revision the package builds. It
+currently points at the `apple-silicon` branch of
+[samtalki/apxchol](https://github.com/samtalki/apxchol), which proposes the
+C ABI and the Metal backend upstream. It moves to `AlgOptGroup/apxchol` once
+that branch is merged.
 
-## Apple silicon
+## Apple silicon and Metal
 
-Apple silicon uses apxchol's CPU/OpenMP path. CUDA is unavailable on macOS.
-A Metal backend (`backend=:metal`) is proposed upstream alongside the C ABI;
-it is not part of this version.
+On Apple silicon the library is also built with apxchol's Metal backend.
+That needs only the macOS SDK from the Command Line Tools: the kernels are
+compiled at run time, so no Xcode Metal toolchain is required.
+`ApxChol.backend_available(:metal)` reports whether the GPU is usable.
+
+```julia
+G = ApxCholSolver(A; backend=:metal, rtol=1e-10)
+R = solve(G, B)      # up to 64 right-hand sides advance in lockstep per batch
+```
+
+- **Factor.** The factor is computed on the CPU exactly as for `:cpu`, and
+  the GPU applies the same fp32 factor.
+- **Precision.** The Krylov vectors (x, r, A p) and an inexact operator are
+  double-float (about 48 bits), since Apple GPUs have no fp64.
+- **Reported residual.** `relative_residual` is recomputed in fp64 against
+  `A`, and `converged` means it is below `rtol`.
+- **Reproducibility.** A column's result is independent of the other
+  columns in the block.
+
+See apxchol's `docs/precision.md` for the precision contract. Performance
+relative to the CPU path has not been established. CUDA is unavailable on
+macOS.
 
 ## Distribution status
 

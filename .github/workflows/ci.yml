@@ -62,8 +62,6 @@ jobs:
           - { os: macos-latest, julia: '1', compiler: AppleClang }
     steps:
       - uses: actions/checkout@v4
-      - name: Verify the vendored C ABI checksums
-        run: cd deps/vendor && shasum -a 256 -c SHA256SUMS
       - uses: julia-actions/setup-julia@v2
         with:
           version: ${{ matrix.julia }}
@@ -76,6 +74,8 @@ jobs:
       - uses: julia-actions/cache@v2
       - name: Instantiate and build
         run: julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.build(verbose=true)'
+      - name: Build configuration
+        run: cat deps/usr/build_info.txt
       - name: Test
         run: julia --project=. --threads=4 -e 'using Pkg; Pkg.test()'
       - name: Check linkage (exactly one OpenMP runtime, the JLL's)
@@ -86,6 +86,7 @@ jobs:
           echo "$deps"
           [ "$(echo "$deps" | grep -ciE 'lib(g|i)?omp')" = 1 ] || { echo "expected one OpenMP library"; exit 1; }
           ! echo "$deps" | grep -qi gomp
+          if [ "$RUNNER_OS" = macOS ]; then echo "$deps" | grep -q Metal.framework; fi
       - name: Run the 9,241-bus regression
         run: |
           curl --fail --location --silent --show-error \

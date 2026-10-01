@@ -1,7 +1,7 @@
 name = "ApxChol"
 uuid = "335b3f1e-a274-4453-ae68-4128a65cdf9b"
 authors = ["Samuel Talkington"]
-version = "0.2.0"
+version = "0.3.0"
 
 [deps]
 LLVMOpenMP_jll = "1d63c593-3942-5779-bab2-d838dc0a180e"
