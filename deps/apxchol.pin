@@ -1,3 +1,3 @@
 # The apxchol revision this package builds. deps/build.jl and CI read it.
 repository=https://github.com/AlgOptGroup/apxchol.git
-revision=a832e70949b65e1142381bddbafbb39dab9a6339
+revision=04cc45693cd286a4603e27431ce8407e2697fb99
