@@ -113,7 +113,7 @@ also available.
 - The library links `LLVMOpenMP_jll`'s `libomp`, the runtime Julia packages
   share. One runtime per process avoids the crashes caused by mixing OpenMP
   runtimes.
-- On load the package sets `KMP_GTID_MODE=3`, unless you set it yourself.
+- On load the package sets `KMP_GTID_MODE=2` (keyed thread-local lookup), unless you set it yourself.
   Otherwise, while few threads exist, libomp identifies a thread by its stack
   address. Julia tasks run on their own stacks, so concurrent solves on
   several Julia threads crashed on Julia 1.10. Load ApxChol before anything

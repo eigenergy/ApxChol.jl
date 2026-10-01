@@ -176,9 +176,10 @@ function __init__()
     # While few threads exist, libomp identifies the calling thread by its stack
     # address. Julia tasks run on their own stacks, so concurrent solves on Julia
     # threads could share one OpenMP thread identity and crash (observed with
-    # Julia 1.10). Thread-local lookup (mode 3) does not depend on the stack; it
-    # must be chosen before libomp's first OpenMP call. A caller's setting wins.
-    haskey(ENV, "KMP_GTID_MODE") || (ENV["KMP_GTID_MODE"] = "3")
+    # Julia 1.10). Keyed thread-local lookup (mode 2, available in every libomp
+    # build) does not depend on the stack; it must be chosen before libomp's
+    # first OpenMP call. A caller's setting wins.
+    haskey(ENV, "KMP_GTID_MODE") || (ENV["KMP_GTID_MODE"] = "2")
     # The OpenMP runtime the library links goes in first: two OpenMP runtimes
     # in one process can crash once a parallel region starts.
     Libdl.dlopen(LLVMOpenMP_jll.libomp_path, Libdl.RTLD_LAZY | Libdl.RTLD_GLOBAL)
