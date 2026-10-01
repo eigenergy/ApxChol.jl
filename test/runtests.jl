@@ -225,9 +225,13 @@ relres(A, x, b) = norm(A * x - b) / norm(b)
         @test solve(S, compatible_rhs(4900)).converged
         @test omp_max_threads() == 3
         omp_set_threads(before)
+        # Julia's own runtime may load its private libgomp (Linux, Julia 1.13);
+        # every other OpenMP runtime in the process must be the JLL's libomp.
+        julia_private = realpath(joinpath(Sys.BINDIR, Base.PRIVATE_LIBDIR))
         runtimes = unique(realpath.(filter(Libdl.dllist()) do path
             name = lowercase(basename(path))
-            any(prefix -> startswith(name, prefix), ("libomp", "libiomp", "libgomp"))
+            any(prefix -> startswith(name, prefix), ("libomp", "libiomp", "libgomp")) &&
+                !startswith(realpath(path), julia_private)
         end))
         @test runtimes == [realpath(LLVMOpenMP_jll.libomp_path)]
     end
