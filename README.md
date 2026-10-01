@@ -1,66 +1,149 @@
-# ApproxCholesky.jl
+# ApxChol.jl
 
-Julia bindings for the C API in [apxchol](https://github.com/AlgOptGroup/apxchol).
-The package builds a shared library from a pinned apxchol revision and links it
-to `LLVMOpenMP_jll`, the OpenMP runtime loaded by Julia. Using one runtime
-avoids the macOS segfault caused by loading Julia's `libomp` and Homebrew
-`libomp` into the same process.
+Julia bindings for [apxchol](https://github.com/AlgOptGroup/apxchol), a parallel
+approximate-Cholesky preconditioned conjugate-gradient solver for graph
+Laplacian, SDDM and lumpable M-matrix systems. The package builds a shared
+library, `libapxchol`, from a pinned apxchol revision and calls it through
+apxchol's exception-safe C ABI.
 
-This repository is private while the C API and binary distribution are under
-review.
+This repository is private while the C ABI and binary distribution are under
+review. (It was previously named ApproxCholesky.jl; the package UUID is unchanged.)
 
 ## Build
 
-Install CMake and a C++23 compiler. On macOS, Xcode command line tools are
-sufficient. Then run:
+Requirements: Linux or macOS, CMake ≥ 3.20, and a C++23 compiler (Apple
+Clang from Xcode 16 or newer, GCC ≥ 14, or Clang ≥ 18). The build downloads
+the pinned apxchol revision and Eigen 3.4.0.
 
 ```julia
 import Pkg
 Pkg.instantiate()
-Pkg.build("ApproxCholesky")
-Pkg.test("ApproxCholesky")
+Pkg.build("ApxChol")
+Pkg.test("ApxChol")
 ```
 
-The build clones the pinned apxchol revision. To build against a local
-checkout instead:
+To build against a local apxchol checkout instead of the pin:
 
 ```julia
 ENV["APXCHOL_SOURCE_DIR"] = "/path/to/apxchol"
-Pkg.build("ApproxCholesky")
+Pkg.build("ApxChol")
 ```
+
+`CXX` selects the compiler. The library is tuned for the build machine
+(`-mcpu=native` on Apple silicon).
 
 ## Use
 
 ```julia
-using ApproxCholesky
-using SparseArrays
+using ApxChol, SparseArrays
 
-A = sparse([2.0 -1.0; -1.0 2.0])
-b = [1.0, 0.0]
-result = solve(A, b; tolerance=1e-10, threads=4)
+S = ApxCholSolver(A; rtol=1e-10, threads=4)  # factorize once
+r = solve(S, b)                              # SolveResult
+r.x, r.iterations, r.relative_residual, r.converged
 
-result.x
-result.iterations
-result.relative_residual
-result.setup_seconds
-result.solve_seconds
+R = solve(S, B)                              # every column of a matrix B
+x = S \ b                                    # throws NotConvergedError if not converged
+solve(A, b; rtol=1e-10)                      # one-shot: factorize, solve, release
 ```
 
-`A` must be a `SparseMatrixCSC` containing a Laplacian or SDDM matrix.
-`threads=0` leaves the OpenMP runtime setting unchanged. Setting a positive
-thread count applies for the duration of the solve, then restores the caller's
-previous setting.
+`A` must be a `SparseMatrixCSC` holding a Laplacian, SDDM matrix or nearly-SDDM
+M-matrix: symmetric, positive diagonal, non-positive off-diagonals. apxchol
+validates it and never reinterprets it. A matrix with a few positive
+off-diagonals is accepted by lumping them onto the diagonal for the
+preconditioner only (the solve still applies `A`). An adjacency matrix is
+rejected with an `ApxCholError(:invalid_operator)` that says so.
 
-## Apple Silicon
+Laplacian systems return the min-norm solution (`sum(x) ≈ 0`). The
+right-hand side must be compatible with every connected component; it is not
+projected.
 
-Apple Silicon uses apxchol's CPU/OpenMP backend. CUDA requires an NVIDIA GPU
-and is unavailable on macOS. The package does not contain a Metal backend.
-A Metal implementation would need sparse triangular solve kernels, a device
-PCG loop, and performance tests against the CPU path before it could be exposed
-through this API.
+### Convergence
+
+`solve` and `solve!` never throw on non-convergence: check `r.converged`
+(`relative_residual < rtol`). The returned iterate is always written. `\` and
+`ldiv!` cannot return a flag, so they throw `NotConvergedError(result)` instead.
+
+### Options
+
+Keyword arguments of `ApxCholSolver` (and of the one-shot `solve(A, b; ...)`).
+`nothing` selects the library default.
+
+| keyword | default | meaning |
+|---|---|---|
+| `rtol` | `1e-8` | relative residual target ‖b − Ax‖/‖b‖ |
+| `maxiter` | `200` | PCG iteration limit |
+| `stagnation_window` | `50` | stop if the residual has not halved in this many iterations (0 disables) |
+| `seed` | `42` | sampling seed |
+| `threads` | `0` | OpenMP threads for every call on the solver; 0 inherits |
+| `sampler` | `:gks` | clique sampler: `:gks` or `:trace_cycle` |
+| `partitioner` | `:block_greedy` | also `:priority_greedy`, `:baumann_kyng` |
+| `storage` | `:vec_pool_aos` | also `:vec`, `:bstr` |
+| `degree_quantile` | by route | independent-set degree cap (see apxchol's `factor_options.h`) |
+| `exact_clique_max_degree` | `0` | exact cliques up to this degree |
+| `keep_factor` | `false` | retain the factor for `ApxChol.factor` |
+| `backend` | `:cpu` | `:metal` needs an apxchol build with the Metal backend |
+
+`solve`, `solve!` and the block forms also take `rtol`, `maxiter` and
+`x0`/`X0` per call.
+
+### Preconditioner for other Krylov solvers
+
+```julia
+using Krylov
+P = ApxChol.aspreconditioner(S)        # ldiv!(y, P, x) applies M⁻¹ once
+x, stats = Krylov.cg(A, b; M=P, ldiv=true)
+```
+
+### Introspection
+
+`ApxChol.stats(S)` reports the factor size, lumped entries, rounds, setup
+time and whether the operator is SDDM. `ApxChol.factor(S)` returns `(L, perm)`
+with `A[p, p] ≈ L * L'` for `p = invperm(perm)` (requires `keep_factor=true`).
+`ApxChol.permutation(S)`, `ApxChol.options(S)` and `ApxChol.version()` are
+also available.
+
+## Threads and concurrency
+
+- `threads = 0` uses the calling thread's OpenMP setting
+  (`OMP_NUM_THREADS`, or `ApxChol.max_threads()`). A positive value applies to
+  each call on that solver and restores the previous setting afterwards.
+- Calls on one `ApxCholSolver` are serialized by a lock. Distinct solvers can
+  be used concurrently from different Julia threads; give each a small
+  `threads` to avoid oversubscribing the machine.
+- The library links `LLVMOpenMP_jll`'s `libomp`, the runtime Julia packages
+  share. One runtime per process avoids the crashes caused by mixing OpenMP
+  runtimes.
+- On load the package sets `KMP_GTID_MODE=3`, unless you set it yourself.
+  Otherwise, while few threads exist, libomp identifies a thread by its stack
+  address. Julia tasks run on their own stacks, so concurrent solves on
+  several Julia threads crashed on Julia 1.10. Load ApxChol before anything
+  else starts OpenMP work.
+- A solver holds native memory, released by its finalizer or by
+  `close(S)`.
+
+## Limits
+
+- `n` and `nnz(A)` must each be at most 2³¹ − 1.
+- Factors larger than 2³² − 1 entries abort the process. Use an apxchol build
+  with `APXCHOL_64BIT_EDGE_INDICES=ON` for those.
+
+## Pinned revision and vendored C ABI
+
+`deps/apxchol.pin` names the apxchol revision the package builds. Upstream
+apxchol does not ship its C ABI yet, so `deps/vendor/` carries byte-identical
+copies of `c_api.h`/`c_api.cpp` from the branch proposing it (see
+`deps/vendor/PROVENANCE`). On macOS, `deps/compat/` patches over the pinned
+revision's Linux-only `madvise` calls. Both directories are removed once the
+package builds against an apxchol revision that includes these changes.
+
+## Apple silicon
+
+Apple silicon uses apxchol's CPU/OpenMP path. CUDA is unavailable on macOS.
+A Metal backend (`backend=:metal`) is proposed upstream alongside the C ABI;
+it is not part of this version.
 
 ## Distribution status
 
-The current source build is intended for development and integration testing.
-A registered package should replace it with platform artifacts built through
+The source build is intended for development and integration testing. A
+registered package should replace it with platform artifacts built through
 BinaryBuilder and an `apxchol_jll` dependency.
