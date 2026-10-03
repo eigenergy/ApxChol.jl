@@ -1,4 +1,4 @@
-using ApproxCholesky
+using ApxChol
 using LinearAlgebra
 using Printf
 using SparseArrays
@@ -50,8 +50,11 @@ function main(path::String)
     rhs = [isodd(i) ? 1.0 : -1.0 for i in axes(matrix, 1)]
     rhs .-= sum(rhs) / length(rhs)
 
+    # The settings this regression has always used (not the library defaults).
     for threads in (1, 2, 4, 8)
-        result = solve(matrix, rhs; tolerance=1e-8, threads=threads, seed=7)
+        solver = ApxCholSolver(matrix; rtol=1e-8, maxiter=1000, stagnation_window=0,
+                               seed=7, threads=threads)
+        result = solve(solver, rhs)
         residual = norm(matrix * result.x - rhs) / norm(rhs)
         result.converged || error("$threads-thread solve did not converge")
         residual <= 1e-8 || error("$threads-thread residual $residual exceeds 1e-8")
@@ -60,9 +63,10 @@ function main(path::String)
             threads,
             result.iterations,
             residual,
-            result.setup_seconds,
+            ApxChol.stats(solver).setup_seconds,
             result.solve_seconds,
         )
+        close(solver)
     end
 end
 

@@ -1,46 +1,84 @@
+# Builds deps/usr/lib/libapxchol from the apxchol revision in deps/apxchol.pin
+# (or ENV["APXCHOL_SOURCE_DIR"]) against LLVMOpenMP_jll's libomp.
 using LLVMOpenMP_jll
 
-const APXCHOL_REVISION = "e80f874c8d7723cadbd9a89b5acf9844555621e7"
-const APXCHOL_REPOSITORY = "https://github.com/samtalki/apxchol.git"
+const DEPS = @__DIR__
 
-function checked_source_directory()
-    configured = get(ENV, "APXCHOL_SOURCE_DIR", "")
-    source = if !isempty(configured)
-        abspath(configured)
-    else
-        checkout = joinpath(@__DIR__, "build", "apxchol-source")
-        if !isdir(joinpath(checkout, ".git"))
-            mkpath(dirname(checkout))
-            run(`git clone --filter=blob:none --no-checkout $APXCHOL_REPOSITORY $checkout`)
-        end
-        run(`git -C $checkout fetch --depth=1 origin $APXCHOL_REVISION`)
-        run(`git -C $checkout checkout --detach FETCH_HEAD`)
-        checkout
+Sys.iswindows() && error("ApxChol.jl supports Linux and macOS only")
+
+function read_pin(path)
+    pin = Dict{String,String}()
+    for line in eachline(path)
+        line = strip(line)
+        (isempty(line) || startswith(line, '#')) && continue
+        key, value = split(line, '='; limit=2)
+        pin[strip(key)] = strip(value)
     end
-
-    isfile(joinpath(source, "include", "apxchol", "c_api.h")) ||
-        error("apxchol source at $source does not contain include/apxchol/c_api.h")
-    return source
+    return pin
 end
 
-cmake = Sys.which("cmake")
-cmake === nothing && error("cmake is required to build ApproxCholesky.jl")
+function git_revision(dir)
+    try
+        return readchomp(`git -C $dir rev-parse HEAD`)
+    catch
+        return "unknown"
+    end
+end
 
-source = checked_source_directory()
-build = joinpath(@__DIR__, "build", "wrapper")
-prefix = joinpath(@__DIR__, "usr")
+function source_directory(pin)
+    configured = get(ENV, "APXCHOL_SOURCE_DIR", "")
+    isempty(configured) || return abspath(configured)
+    checkout = joinpath(DEPS, "build", "apxchol-source")
+    if !isdir(joinpath(checkout, ".git"))
+        rm(checkout; force=true, recursive=true)
+        mkpath(dirname(checkout))
+        run(`git init -q $checkout`)
+        run(`git -C $checkout remote add origin $(pin["repository"])`)
+    else
+        run(`git -C $checkout remote set-url origin $(pin["repository"])`)
+    end
+    run(`git -C $checkout fetch -q --depth=1 origin $(pin["revision"])`)
+    run(`git -C $checkout checkout -q --detach FETCH_HEAD`)
+    head = git_revision(checkout)
+    head == pin["revision"] || error("apxchol checkout is at $head, expected $(pin["revision"])")
+    return checkout
+end
+
+pin = read_pin(joinpath(DEPS, "apxchol.pin"))
+source = source_directory(pin)
+for required in ("src/factorization.cpp", "src/operator_class.cpp", "src/solve.cpp",
+                 "include/apxchol/version.h.in", "cmake/apxchol_native_arch.cmake")
+    isfile(joinpath(source, required)) || error("apxchol source at $source lacks $required")
+end
+revision = git_revision(source)
+
+cmake = Sys.which("cmake")
+cmake === nothing && error("CMake (>= 3.20) is required to build ApxChol.jl")
+
+build = joinpath(DEPS, "build", "libapxchol")
+prefix = joinpath(DEPS, "usr")
+rm(prefix; force=true, recursive=true)
 mkpath(build)
-mkpath(prefix)
 
 omp_include = joinpath(LLVMOpenMP_jll.artifact_dir, "include")
 omp_library = LLVMOpenMP_jll.libomp_path
-config = `$cmake -S $(@__DIR__) -B $build -DCMAKE_BUILD_TYPE=Release -DAPXCHOL_SOURCE_DIR=$source -DAPXCHOL_OPENMP_INCLUDE_DIR=$omp_include -DAPXCHOL_OPENMP_LIBRARY=$omp_library -DCMAKE_INSTALL_PREFIX=$prefix`
-run(config)
+short_revision = revision == "unknown" ? revision : revision[1:7]
+run(`$cmake -S $DEPS -B $build -DCMAKE_BUILD_TYPE=Release
+     -DAPXCHOL_SOURCE_DIR=$source -DAPXCHOL_GIT_SHA=$short_revision
+     -DAPXCHOL_JL_OPENMP_INCLUDE_DIR=$omp_include
+     -DAPXCHOL_JL_OPENMP_LIBRARY=$omp_library
+     -DCMAKE_INSTALL_PREFIX=$prefix`)
 run(`$cmake --build $build --config Release --parallel`)
 run(`$cmake --install $build --config Release`)
 
-library_name = Sys.iswindows() ? "approxcholesky.dll" :
-               Sys.isapple() ? "libapproxcholesky.dylib" : "libapproxcholesky.so"
-library_path = Sys.iswindows() ? joinpath(prefix, "bin", library_name) :
-                                joinpath(prefix, "lib", library_name)
-isfile(library_path) || error("wrapper library was not installed at $library_path")
+library = joinpath(prefix, "lib", Sys.isapple() ? "libapxchol.dylib" : "libapxchol.so")
+isfile(library) || error("libapxchol was not installed at $library")
+cache = readlines(joinpath(build, "CMakeCache.txt"))
+compiler_line = findfirst(l -> startswith(l, "CMAKE_CXX_COMPILER:"), cache)
+compiler = compiler_line === nothing ? "unknown" : split(cache[compiler_line], '='; limit=2)[2]
+open(joinpath(prefix, "build_info.txt"), "w") do io
+    println(io, "apxchol_source=", isempty(get(ENV, "APXCHOL_SOURCE_DIR", "")) ? pin["repository"] : source)
+    println(io, "apxchol_revision=", revision)
+    println(io, "libomp=", omp_library)
+    println(io, "compiler=", compiler)
+end
