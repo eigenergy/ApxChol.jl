@@ -429,3 +429,5 @@ end
         @info "Metal backend unavailable in this build or on this machine; skipping test/metal.jl"
     end
 end
+
+include("boundary.jl")

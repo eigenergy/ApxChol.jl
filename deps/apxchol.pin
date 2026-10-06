@@ -1,5 +1,4 @@
-# The apxchol revision this package builds. deps/build.jl and CI read it.
-# The fork's main (the branch proposing the C ABI and the Metal backend upstream); repin to
-# AlgOptGroup/apxchol once that branch is merged.
+# Immutable source for the C ABI, CPU exit certification and Metal backend.
+# Move to AlgOptGroup/apxchol after the upstream integration is accepted.
 repository=https://github.com/samtalki/apxchol.git
-revision=cd89b44f057669b05fc73632668c1b11ec8395e7
+revision=3aa5212cfd76d641ec9c9c1f28268428f8b9a44b

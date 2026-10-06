@@ -109,7 +109,7 @@ Base.showerror(io::IO, e::ApxCholError) = print(io, "ApxCholError(:", e.status, 
 """
     SolveResult
 
-Result of one solve: the solution `x`, PCG `iterations`, the PCG's final
+Result of one solve: the solution `x`, PCG `iterations`, the original-system
 `relative_residual` ‖b − Ax‖/‖b‖, `converged` (`relative_residual < rtol`) and
 `solve_seconds`. A solve that does not converge still returns its iterate.
 """
@@ -285,7 +285,23 @@ end
 # A square, non-empty `SparseMatrixCSC{Float64,Int64}` view or copy of `A`.
 function operator_csc(A::SparseMatrixCSC)
     n = LinearAlgebra.checksquare(A)
-    n >= 1 || throw(ArgumentError("A must have at least one row"))
+    1 <= n <= typemax(Int32) || throw(ArgumentError("A dimension must be in 1:2^31-1"))
+    # SparseMatrixCSC's public arrays are mutable. Check bounds BEFORE either
+    # converting storage or exposing pointers to native code.
+    length(A.colptr) == n + 1 || throw(ArgumentError("CSC colptr must have n+1 entries"))
+    A.colptr[1] == 1 || throw(ArgumentError("CSC colptr must start at 1"))
+    previous = A.colptr[1]
+    for stop in A.colptr
+        stop >= previous || throw(ArgumentError("CSC colptr must be nondecreasing"))
+        previous = stop
+    end
+    count = A.colptr[end] - 1
+    count <= typemax(Int32) || throw(ArgumentError("CSC nnz exceeds 2^31-1"))
+    count <= length(A.rowval) && count <= length(A.nzval) ||
+        throw(ArgumentError("CSC pointers exceed row/value storage"))
+    for i in 1:count
+        1 <= A.rowval[i] <= n || throw(ArgumentError("CSC row index out of range"))
+    end
     return n, A isa SparseMatrixCSC{Float64,Int64} ? A : SparseMatrixCSC{Float64,Int64}(A)
 end
 
@@ -333,6 +349,7 @@ mutable struct ApxCholSolver
     const n::Int
     const options::COptions
     const lock::ReentrantLock
+    const error_buffer::Vector{UInt8}  # read and written only while lock is held
 end
 
 """
@@ -379,7 +396,7 @@ function ApxCholSolver(A::SparseMatrixCSC; rtol=nothing, maxiter=nothing,
          Ref{Ptr{Cvoid}}, Ptr{UInt8}, Csize_t),
         n, M.colptr, M.rowval, M.nzval, 1, options, handle, buffer, length(buffer))
     check(status, buffer)
-    return finalizer(destroy!, ApxCholSolver(handle[], n, options, ReentrantLock()))
+    return finalizer(destroy!, ApxCholSolver(handle[], n, options, ReentrantLock(), buffer))
 end
 
 function ApxCholSolver(A::SparseMatrixCSC, F::ApxCholFactor; rtol=nothing, maxiter=nothing,
@@ -400,7 +417,7 @@ function ApxCholSolver(A::SparseMatrixCSC, F::ApxCholFactor; rtol=nothing, maxit
             n, M.colptr, M.rowval, M.nzval, 1, fptr, options, handle, buffer, length(buffer))
     end
     check(status, buffer)
-    return finalizer(destroy!, ApxCholSolver(handle[], n, options, ReentrantLock()))
+    return finalizer(destroy!, ApxCholSolver(handle[], n, options, ReentrantLock(), buffer))
 end
 
 function ApxCholFactor(A::SparseMatrixCSC; seed=nothing, threads::Integer=0, sampler=nothing,
@@ -521,16 +538,16 @@ function solve!(x::Vector{Float64}, S::ApxCholSolver, b::AbstractVector{<:Real};
     rhs = dense_vector(b)
     guess = x0 === nothing ? nothing : dense_vector(x0)
     info = Ref(CSolveInfo())
-    buffer = zeros(UInt8, ERROR_CAPACITY)
-    status = with_handle(S) do ptr
-        GC.@preserve rhs guess x ccall(
+    with_handle(S) do ptr
+        buffer = S.error_buffer
+        status = GC.@preserve rhs guess x ccall(
             (:apxchol_solver_solve, libapxchol), Int32,
             (Ptr{Cvoid}, Ptr{Float64}, Ptr{Float64}, Ptr{Float64}, Float64, Int32,
              Ref{CSolveInfo}, Ptr{UInt8}, Csize_t),
             ptr, rhs, guess === nothing ? C_NULL : pointer(guess), x,
             call_tol(rtol), call_maxiter(maxiter), info, buffer, length(buffer))
+        status == 1 || check(status, buffer)
     end
-    status == 1 || check(status, buffer)
     i = info[]
     return SolveResult(x, i.iterations, i.relative_residual, i.converged == 1, i.solve_seconds)
 end
@@ -548,17 +565,17 @@ function solve!(X::Matrix{Float64}, S::ApxCholSolver, B::AbstractMatrix{<:Real};
     iterations = Vector{Int64}(undef, k)
     residuals = Vector{Float64}(undef, k)
     converged = Vector{Int32}(undef, k)
-    buffer = zeros(UInt8, ERROR_CAPACITY)
-    status = with_handle(S) do ptr
-        GC.@preserve rhs guess X iterations residuals converged ccall(
+    with_handle(S) do ptr
+        buffer = S.error_buffer
+        status = GC.@preserve rhs guess X iterations residuals converged ccall(
             (:apxchol_solver_solve_block, libapxchol), Int32,
             (Ptr{Cvoid}, Int64, Ptr{Float64}, Ptr{Float64}, Ptr{Float64}, Float64, Int32,
              Ptr{Int64}, Ptr{Float64}, Ptr{Int32}, Ptr{UInt8}, Csize_t),
             ptr, k, rhs, guess === nothing ? C_NULL : pointer(guess), X,
             call_tol(rtol), call_maxiter(maxiter), iterations, residuals, converged,
             buffer, length(buffer))
+        status == 1 || check(status, buffer)
     end
-    status == 1 || check(status, buffer)
     return BlockSolveResult(X, iterations, residuals, converged .== 1)
 end
 
@@ -621,14 +638,14 @@ up to a constant vector.
 function apply!(z::Vector{Float64}, S::ApxCholSolver, r::AbstractVector{<:Real})
     check_length(r, S.n, "r"); check_length(z, S.n, "z")
     v = dense_vector(r)
-    buffer = zeros(UInt8, ERROR_CAPACITY)
-    status = with_handle(S) do ptr
-        GC.@preserve v z ccall(
+    with_handle(S) do ptr
+        buffer = S.error_buffer
+        status = GC.@preserve v z ccall(
             (:apxchol_solver_apply, libapxchol), Int32,
             (Ptr{Cvoid}, Ptr{Float64}, Ptr{Float64}, Ptr{UInt8}, Csize_t),
             ptr, v, z, buffer, length(buffer))
+        check(status, buffer)
     end
-    check(status, buffer)
     return z
 end
 

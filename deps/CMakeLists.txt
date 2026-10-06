@@ -93,3 +93,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 
 install(TARGETS apxchol LIBRARY DESTINATION lib)
+
+# Keep native dependency notices with locally installed artifacts as well.
+install(FILES "${_src}/LICENSE" DESTINATION share/licenses/apxchol)
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/../THIRD_PARTY_NOTICES.md"
+        DESTINATION share/licenses/ApxChol)

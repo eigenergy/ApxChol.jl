@@ -4,7 +4,7 @@ Julia bindings for [apxchol](https://github.com/AlgOptGroup/apxchol), a parallel
 approximate-Cholesky preconditioned conjugate-gradient solver for graph
 Laplacian, SDDM and lumpable M-matrix systems. The package builds a shared
 library, `libapxchol`, from a pinned apxchol revision and calls it through
-apxchol's exception-safe C ABI.
+apxchol's C ABI, which maps ordinary C++ exceptions to error statuses.
 
 This repository is private while the C ABI and binary distribution are under
 review. (It was previously named ApproxCholesky.jl; the package UUID is unchanged.)
@@ -82,7 +82,13 @@ is the solver `ApxCholSolver(A)` builds.
 ### Convergence
 
 `solve` and `solve!` never throw on non-convergence: check `r.converged`
-(`relative_residual < rtol`). The returned iterate is always written. `\` and
+(`relative_residual < rtol`). The residual is recomputed in fp64 against the
+original operator at native solve exit. CPU norms are scaled to avoid
+underflow/overflow; a zero RHS has residual zero only for an exactly zero
+residual vector. Non-finite CPU exit arithmetic reports infinity.
+Certification is included in `solve_seconds`; it adds no retries. An extreme
+RHS can still defeat the internal PCG recurrence and return non-convergence.
+The returned iterate is always written on success or non-convergence. `\` and
 `ldiv!` cannot return a flag, so they throw `NotConvergedError(result)` instead.
 
 ### Options
@@ -152,17 +158,21 @@ also available. `stats`, `factor` and `permutation` also take an
 
 ## Limits
 
-- `n` and `nnz(A)` must each be at most 2³¹ − 1.
+- `n` and `nnz(A)` must each be at most 2³¹ − 1. Mutable CSC buffer bounds
+  are checked before native access; do not mutate input arrays during a call.
+- Native callers must provide valid live pointers and the documented buffer
+  lengths. The C ABI cannot validate arbitrary addresses or allocation sizes.
+- Exceptions escaping native OpenMP regions can terminate the process; ordinary
+  exception-to-status handling is not process isolation.
 - Factors larger than 2³² − 1 entries abort the process. Use an apxchol build
   with `APXCHOL_64BIT_EDGE_INDICES=ON` for those.
 
 ## Pinned revision
 
-`deps/apxchol.pin` names the apxchol revision the package builds. It
-currently points at the `apple-silicon` branch of
-[samtalki/apxchol](https://github.com/samtalki/apxchol), which proposes the
-C ABI and the Metal backend upstream. It moves to `AlgOptGroup/apxchol` once
-that branch is merged.
+`deps/apxchol.pin` names the apxchol revision the package builds. The pin is an immutable commit from
+[samtalki/apxchol](https://github.com/samtalki/apxchol), where the C ABI and
+Metal changes are proposed upstream. It will move to an accepted commit on
+`AlgOptGroup/apxchol` after integration; no branch name determines the build.
 
 ## Apple silicon and Metal
 
@@ -183,6 +193,9 @@ R = solve(G, B)      # up to 64 right-hand sides advance in lockstep per batch
   double-float (about 48 bits), since Apple GPUs have no fp64.
 - **Reported residual.** `relative_residual` is recomputed in fp64 against
   `A`, and `converged` means it is below `rtol`.
+- **Extreme RHS/guess scales.** The C ABI rejects nonzero vectors whose
+  unscaled squared norm underflows to zero or overflows (`:unsupported`).
+  Metal's host norm reductions do not yet have CPU's scaling protection.
 - **Reproducibility.** A column's result is independent of the other
   columns in the block.
 
@@ -195,3 +208,11 @@ macOS.
 The source build is intended for development and integration testing. A
 registered package should replace it with platform artifacts built through
 BinaryBuilder and an `apxchol_jll` dependency.
+
+## License
+
+The Julia wrapper is MIT licensed. The native library retains apxchol's
+BSD-4-Clause license; see [third-party notices](THIRD_PARTY_NOTICES.md).
+
+This product includes software developed by ETH Zürich and the apxchol
+contributors.
