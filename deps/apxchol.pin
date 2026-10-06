@@ -1,4 +1,4 @@
 # Immutable source for the C ABI, CPU exit certification and Metal backend.
 # Move to AlgOptGroup/apxchol after the upstream integration is accepted.
 repository=https://github.com/samtalki/apxchol.git
-revision=3aa5212cfd76d641ec9c9c1f28268428f8b9a44b
+revision=0f33bb33900ab25c81a494c617c5723143ad4117
