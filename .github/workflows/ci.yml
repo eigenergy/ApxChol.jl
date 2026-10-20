@@ -75,9 +75,22 @@ jobs:
       - name: Instantiate and build
         run: julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.build(verbose=true)'
       - name: Build configuration
-        run: cat deps/usr/build_info.txt
+        run: |
+          cat deps/usr/build_info.txt
+          julia --project=. -e 'using ApxChol; println("version=", ApxChol.version(), " metal=", ApxChol.backend_available(:metal))'
       - name: Test
         run: julia --project=. --threads=4 -e 'using Pkg; Pkg.test()'
+      - name: Test the Metal backend under Metal's validation layers
+        if: runner.os == 'macOS'
+        env:
+          MTL_DEBUG_LAYER: '1'
+          MTL_SHADER_VALIDATION: '1'
+        run: |
+          if julia --project=. -e 'using ApxChol; exit(ApxChol.backend_available(:metal) ? 0 : 1)'; then
+            julia --project=. --threads=4 -e 'using Pkg; Pkg.test()'
+          else
+            echo "::warning::No usable Metal device on this runner; the Metal tests did not run"
+          fi
       - name: Check linkage (exactly one OpenMP runtime, the JLL's)
         shell: bash
         run: |
