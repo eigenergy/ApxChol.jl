@@ -2,212 +2,214 @@
 
 Julia bindings for [apxchol](https://github.com/AlgOptGroup/apxchol), a parallel
 approximate-Cholesky preconditioned conjugate-gradient solver for graph
-Laplacian, SDDM and lumpable M-matrix systems. The package builds a shared
-library, `libapxchol`, from a pinned apxchol revision and calls it through
-apxchol's C ABI, which maps ordinary C++ exceptions to error statuses.
+Laplacian, SDDM and lumpable M-matrix systems. The package builds `libapxchol`
+from a pinned apxchol revision and calls it only through apxchol's C ABI
+(`include/apxchol/c_api.h`), which it mirrors function for function.
 
 This repository is private while the C ABI and binary distribution are under
 review. (It was previously named ApproxCholesky.jl; the package UUID is unchanged.)
 
 ## Build
 
-Requirements: Linux or macOS, CMake ≥ 3.20, and a C++23 compiler (Apple
-Clang from Xcode 16 or newer, GCC ≥ 14, or Clang ≥ 18). The build downloads
-the pinned apxchol revision and Eigen 3.4.0.
+Requirements: Linux or macOS, CMake ≥ 3.20, and a C++23 compiler (Apple Clang
+from Xcode 16 or newer, GCC ≥ 14, or Clang ≥ 18). The build fetches the pinned
+apxchol revision and configures it with apxchol's own `cmake/apxchol_core.cmake`,
+as apxchol's Python bindings do, against `LLVMOpenMP_jll`'s OpenMP runtime.
 
 ```julia
 import Pkg
-Pkg.instantiate()
 Pkg.build("ApxChol")
 Pkg.test("ApxChol")
 ```
 
-To build against a local apxchol checkout instead of the pin:
+`ENV["APXCHOL_SOURCE_DIR"] = "/path/to/apxchol"` builds a local checkout instead
+of the pin; `CXX` selects the compiler. The library is tuned for the build
+machine. On Apple silicon it includes apxchol's Metal backend.
+
+## Quick start
 
 ```julia
-ENV["APXCHOL_SOURCE_DIR"] = "/path/to/apxchol"
-Pkg.build("ApxChol")
+using ApxChol, LinearAlgebra, SparseArrays
+
+S = ApxCholSolver(A; rtol=1e-10)     # factorize once
+x = S \ b                            # solve; throws NotConvergedError if it does not converge
+ldiv!(x, S, b)                       # into x (x may be b itself)
+X = S \ B                            # every column of B
+
+r = ApxChol.solve!(x, S, b)          # never throws on non-convergence:
+r.converged, r.iterations, r.relative_residual, r.solve_seconds
 ```
 
-`CXX` selects the compiler. The library is tuned for the build machine
-(`-mcpu=native` on Apple silicon).
+`A` is a `SparseMatrixCSC` with real values and `Int32` or `Int64` indices, or a
+`Symmetric`/`Hermitian` wrapper of one. It must be a Laplacian, an SDDM matrix
+or a nearly-SDDM M-matrix: symmetric, positive diagonal, nonpositive
+off-diagonals. apxchol validates it and never reinterprets it; a few positive
+off-diagonals are lumped onto the diagonal for the preconditioner only, and an
+adjacency matrix is rejected with `ApxCholError(:invalid_operator)`. Laplacian
+systems return the min-norm solution and need a right-hand side compatible with
+every connected component.
 
-## Use
+`b`, `x` and `x0` may be any real vectors. Contiguous `Float64` vectors, views
+included, are handed to apxchol in place, and a warmed-up `solve!`, `ldiv!` or
+`apply!` on them allocates nothing in Julia. Other vectors are converted once.
+
+## Convergence and the reported residual
+
+`relative_residual` is ‖b − A x‖/‖b‖ of the returned `x`, recomputed by apxchol
+in FP64 from the original operator on every backend; `converged` means it is
+below `rtol`. A right-hand side of any scale is solved: far from unit scale
+apxchol solves the exactly power-of-two scaled problem. `solve` and `solve!`
+report non-convergence in their result; `\` and `ldiv!` have no flag to return
+and throw `NotConvergedError(result)` instead. The returned iterate is always
+written.
+
+## Factor reuse and export
 
 ```julia
-using ApxChol, SparseArrays
+F = ApxCholFactor(A; seed=7)         # factorize once, without a solver
+S1 = ApxCholSolver(A, F)             # A preconditioned by F
+S2 = ApxCholSolver(A2, F)            # another operator of the same size
+F2 = ApxCholFactor(S)                # the factor of a solver made with keep_factor=true
 
-S = ApxCholSolver(A; rtol=1e-10, threads=4)  # factorize once
-r = solve(S, b)                              # SolveResult
-r.x, r.iterations, r.relative_residual, r.converged
-
-R = solve(S, B)                              # every column of a matrix B
-x = S \ b                                    # throws NotConvergedError if not converged
-solve(A, b; rtol=1e-10)                      # one-shot: factorize, solve, release
+f = ApxChol.factor(F)                # ExportedFactor
+f.L, f.p                             # A[f.p, f.p] ≈ f.L * f.L'  (L::SparseMatrixCSC{Float32,Int64})
+ApxChol.ordering(S)                  # f.p, always available
 ```
 
-`A` must be a `SparseMatrixCSC` holding a Laplacian, SDDM matrix or nearly-SDDM
-M-matrix: symmetric, positive diagonal, non-positive off-diagonals. apxchol
-validates it and never reinterprets it. A matrix with a few positive
-off-diagonals is accepted by lumping them onto the diagonal for the
-preconditioner only (the solve still applies `A`). An adjacency matrix is
-rejected with an `ApxCholError(:invalid_operator)` that says so.
+Each solver adopts its own copy of the factor, so factors and solvers close in
+any order. `ApxCholSolver(A2, F)` takes only the solve keywords; `A2` must have
+`F`'s size. A Laplacian factor refuses an SDDM operator; an SDDM factor may
+precondition a Laplacian, whose solution is then not centred. On its own
+matrix, `ApxCholSolver(A, ApxCholFactor(A))` is bit for bit the solver
+`ApxCholSolver(A)` builds.
 
-Laplacian systems return the min-norm solution (`sum(x) ≈ 0`). The
-right-hand side must be compatible with every connected component; it is not
-projected.
+## Options
 
-### Factor reuse
-
-```julia
-F = ApxCholFactor(A; seed=7)        # factorize once, no solver
-S1 = ApxCholSolver(A, F)            # A preconditioned by F
-S2 = ApxCholSolver(A2, F; rtol=1e-10)  # another operator of the same size, same factor
-F2 = ApxCholFactor(S)               # the factor of a solver made with keep_factor=true
-L, perm = ApxChol.factor(F)         # a factor always keeps its values
-```
-
-Each solver adopts its own copy of the factor, so factors and solvers can be
-closed in any order. A factor carries only factorization options.
-`ApxCholSolver(A2, F)` takes only the solve keywords (`rtol`, `maxiter`,
-`stagnation_window`, `threads`, `keep_factor`, `backend`; apxchol's defaults
-unless given);
-`A2` is validated like any operator and must have `F`'s size. A Laplacian
-factor refuses an SDDM operator (`ApxCholError(:invalid_argument)`); an SDDM
-factor may precondition a Laplacian, whose solution is then not centred.
-Convergence on another operator depends on how close it is: check
-`r.converged`. On the factor's own matrix, `ApxCholSolver(A, ApxCholFactor(A))`
-is the solver `ApxCholSolver(A)` builds.
-
-### Convergence
-
-`solve` and `solve!` never throw on non-convergence: check `r.converged`
-(`relative_residual < rtol`). The residual is recomputed in fp64 against the
-original operator at native solve exit. CPU norms are scaled to avoid
-underflow/overflow; a zero RHS has residual zero only for an exactly zero
-residual vector. Non-finite CPU exit arithmetic reports infinity.
-Certification is included in `solve_seconds`; it adds no retries. An extreme
-RHS can still defeat the internal PCG recurrence and return non-convergence.
-The returned iterate is always written on success or non-convergence. `\` and
-`ldiv!` cannot return a flag, so they throw `NotConvergedError(result)` instead.
-
-### Options
-
-Keyword arguments of `ApxCholSolver` (and of the one-shot `solve(A, b; ...)`).
-`nothing` selects the library default.
+Keywords of `ApxCholSolver` (and of the one-shot `ApxChol.solve(A, b; ...)`);
+unset keywords take apxchol's defaults, which `ApxChol.options(S)` reports.
 
 | keyword | default | meaning |
 |---|---|---|
-| `rtol` | `1e-8` | relative residual target ‖b − Ax‖/‖b‖ |
+| `backend` | `:auto` | `:auto` chooses as apxchol's C++ solver does (CPU for ≤ 32,768 rows and when adopting a factor, else Metal when usable); `:cpu`; `:metal` |
+| `rtol` | `1e-8` | relative residual target |
 | `maxiter` | `200` | PCG iteration limit |
 | `stagnation_window` | `50` | stop if the residual has not halved in this many iterations (0 disables) |
+| `factor_storage` | `nothing` | triangular-solve storage `Float16` or `Float32`; `nothing` reads `APXCHOL_FACTOR_STORAGE`, then the backend default (`Float32` on CPU and Metal) |
+| `threads` | `0` | OpenMP team of every call on the solver; 0 inherits the calling thread's |
+| `keep_factor` | `false` | retain the factor values for `ApxChol.factor` and `ApxCholFactor(S)` |
 | `seed` | `42` | sampling seed |
-| `threads` | `0` | OpenMP threads for every call on the solver; 0 inherits |
-| `sampler` | `:gks` | clique sampler: `:gks` or `:trace_cycle` |
+| `sampler` | `:gks` | also `:trace_cycle` |
 | `partitioner` | `:block_greedy` | also `:priority_greedy`, `:baumann_kyng` |
-| `storage` | `:vec_pool_aos` | also `:vec`, `:bstr` |
-| `degree_quantile` | by route | independent-set degree cap (see apxchol's `factor_options.h`) |
+| `degree_quantile` | by route | independent-set degree cap (apxchol's `factor_options.h`) |
 | `exact_clique_max_degree` | `0` | exact cliques up to this degree |
 | `omp_threshold` | `2000` | active vertices before the factorization engages OpenMP |
-| `keep_factor` | `false` | retain the factor for `ApxChol.factor` |
-| `backend` | `:cpu` | `:metal`: Apple-GPU block PCG (Apple silicon) |
 
-`solve`, `solve!` and the block forms also take `rtol`, `maxiter` and
-`x0`/`X0` per call.
+`ApxChol.solve!`/`ApxChol.solve` also take `rtol`, `maxiter` and `x0` (`X0` for
+matrices) per call. `ApxChol.stats(S)` reports the route chosen (`backend`), the
+installed `factor_storage`, the factor size, rounds, lumped entries and setup
+time.
 
-### Preconditioner for other Krylov solvers
+## Preconditioner for other Krylov solvers
 
 ```julia
 using Krylov
-P = ApxChol.aspreconditioner(S)        # ldiv!(y, P, x) applies M⁻¹ once
+P = ApxChol.aspreconditioner(S)      # ldiv!(y, P, x) applies M⁻¹ once, allocation-free
 x, stats = Krylov.cg(A, b; M=P, ldiv=true)
 ```
 
 With an SDDM factor `P` is a fixed linear map. With a Laplacian factor it is
-fixed only up to a constant vector: the CPU backend centres every 10th
-application (apxchol's center-k schedule, `APXCHOL_CENTER_K`), so repeated
-applications of a mean-zero `r` agree up to a constant.
+fixed only up to a constant vector: the CPU route centres every 10th
+application (apxchol's center-k schedule, `APXCHOL_CENTER_K`), Metal every one.
 
-### Introspection
+## Safety and concurrency
 
-`ApxChol.stats(S)` reports the factor size, lumped entries, rounds, setup
-time and whether the factor is SDDM. `ApxChol.factor(S)` returns `(L, perm)`
-with `A[p, p] ≈ L * L'` for `p = invperm(perm)` (requires `keep_factor=true`).
-`ApxChol.permutation(S)`, `ApxChol.options(S)` and `ApxChol.version()` are
-also available. `stats`, `factor` and `permutation` also take an
-`ApxCholFactor`.
+- **Memory.** A solver or factor owns native memory, released by `close` or its
+  finalizer. Every native call keeps its handle and arrays rooted, so a
+  finalizer can never run under it; after `close` every call throws
+  `InvalidStateException`. Array lengths are checked in Julia before any
+  pointer reaches apxchol, which checks every index it reads. Partially
+  overlapping input and output arrays are copied; exact aliases are allowed.
+- **Threads.** Calls on one solver are serialized by its lock, and `close`
+  waits for a call in flight. Reads of one factor (adoptions, `stats`,
+  `factor`) run concurrently, and `close` waits for them. Distinct solvers run
+  concurrently from different Julia threads; give each a small `threads`.
+- **Garbage collection.** On Julia 1.12 and later native calls are GC-safe:
+  other threads keep collecting garbage while a long factorization or solve runs.
+- **One OpenMP runtime.** The library links `LLVMOpenMP_jll`'s `libomp`, which
+  Julia packages share. On load the package sets `KMP_GTID_MODE=2` unless you
+  have, so concurrent solves on Julia's task stacks get distinct OpenMP thread
+  identities.
+- **Load-time check.** `using ApxChol` verifies that the library is the pinned
+  revision, built against the current `libomp`, with this package's C ABI
+  layout; otherwise it asks for `Pkg.build("ApxChol")`.
 
-## Threads and concurrency
+## Parity with the C ABI
 
-- `threads = 0` uses the calling thread's OpenMP setting
-  (`OMP_NUM_THREADS`, or `ApxChol.max_threads()`). A positive value applies to
-  each call on that solver and restores the previous setting afterwards.
-- Calls on one `ApxCholSolver` are serialized by a lock. Distinct solvers can
-  be used concurrently from different Julia threads; give each a small
-  `threads` to avoid oversubscribing the machine.
-- The library links `LLVMOpenMP_jll`'s `libomp`, the runtime Julia packages
-  share. One runtime per process avoids the crashes caused by mixing OpenMP
-  runtimes.
-- On load the package sets `KMP_GTID_MODE=2` (keyed thread-local lookup), unless you set it yourself.
-  Otherwise, while few threads exist, libomp identifies a thread by its stack
-  address. Julia tasks run on their own stacks, so concurrent solves on
-  several Julia threads crashed on Julia 1.10. Load ApxChol before anything
-  else starts OpenMP work.
-- A solver or factor holds native memory, released by its finalizer or by
-  `close`. Calls on one factor are serialized by a lock, as on a solver.
+| C ABI | ApxChol |
+|---|---|
+| `apxchol_solver_create` | `ApxCholSolver(A; ...)` |
+| `apxchol_solver_create_from_factor` | `ApxCholSolver(A, F; ...)` |
+| `apxchol_solver_solve` | `S \ b`, `ldiv!`, `ApxChol.solve!`, `ApxChol.solve` |
+| `apxchol_solver_solve_block` | the same with matrices |
+| `apxchol_solver_apply` | `ApxChol.apply!`, `ApxChol.aspreconditioner` |
+| `apxchol_solver_stats`, `apxchol_factor_stats` | `ApxChol.stats` |
+| `apxchol_solver_export_factor`, `apxchol_factor_export` | `ApxChol.factor`, `ApxChol.ordering` |
+| `apxchol_factor_create` | `ApxCholFactor(A; ...)` |
+| `apxchol_solver_copy_factor` | `ApxCholFactor(S)` |
+| `apxchol_solver_destroy`, `apxchol_factor_destroy` | `close`, finalizers |
+| `apxchol_options_default` | the keyword defaults (`ApxChol.options`) |
+| `apxchol_backend_available`, `apxchol_get_max_threads`, `apxchol_openmp_enabled`, `apxchol_version` | `ApxChol.backend_available`, `max_threads`, `openmp_enabled`, `version` |
+| `apxchol_c_abi_version` | checked when the package loads |
+
+The tests compile a C program against the same library, solve the same system
+through both at one thread, and require identical factor, ordering, solution and
+residual bytes (`test/digest.jl`).
 
 ## Limits
 
-- `n` and `nnz(A)` must each be at most 2³¹ − 1. Mutable CSC buffer bounds
-  are checked before native access; do not mutate input arrays during a call.
-- Native callers must provide valid live pointers and the documented buffer
-  lengths. The C ABI cannot validate arbitrary addresses or allocation sizes.
-- Exceptions escaping native OpenMP regions can terminate the process; ordinary
-  exception-to-status handling is not process isolation.
-- Factors larger than 2³² − 1 entries abort the process. Use an apxchol build
-  with `APXCHOL_64BIT_EDGE_INDICES=ON` for those.
-
-## Pinned revision
-
-`deps/apxchol.pin` names the apxchol revision the package builds. The pin is an immutable commit from
-[samtalki/apxchol](https://github.com/samtalki/apxchol), where the C ABI and
-Metal changes are proposed upstream. It will move to an accepted commit on
-`AlgOptGroup/apxchol` after integration; no branch name determines the build.
+- `n` and `nnz(A)` must each be at most 2³¹ − 1; do not mutate `A` during a call.
+- Factors with more than 2³² − 1 entries abort the process; use an apxchol build
+  with `APXCHOL_64BIT_EDGE_INDICES=ON` for those. An exception escaping a native
+  OpenMP region terminates the process.
+- CUDA is not exposed by the C ABI.
 
 ## Apple silicon and Metal
 
-On Apple silicon the library is also built with apxchol's Metal backend.
-That needs only the macOS SDK from the Command Line Tools: the kernels are
-compiled at run time, so no Xcode Metal toolchain is required.
-`ApxChol.backend_available(:metal)` reports whether the GPU is usable.
+`ApxChol.backend_available(:metal)` reports whether the GPU is usable. Metal
+factorizes on the host exactly as the CPU route does and solves one right-hand
+side at a time on the GPU with double-float Krylov vectors (about 48 bits);
+`relative_residual` is recomputed in FP64. `factor_storage=Float16` stores the
+triangular-solve factor values in FP16. `ApxCholSolver(A, F; backend=:metal)` adopts a host factor.
+See apxchol's `docs/precision.md` for the precision contract.
 
-```julia
-G = ApxCholSolver(A; backend=:metal, rtol=1e-10)
-R = solve(G, B)      # up to 64 right-hand sides advance in lockstep per batch
-```
+## Migrating from 0.3
 
-- **Factor.** The factor is computed on the CPU exactly as for `:cpu`, and
-  the GPU applies the same fp32 factor. `ApxCholSolver(A, F; backend=:metal)`
-  adopts an `ApxCholFactor` as on the CPU.
-- **Precision.** The Krylov vectors (x, r, A p) and an inexact operator are
-  double-float (about 48 bits), since Apple GPUs have no fp64.
-- **Reported residual.** `relative_residual` is recomputed in fp64 against
-  `A`, and `converged` means it is below `rtol`.
-- **Extreme RHS/guess scales.** The C ABI rejects nonzero vectors whose
-  unscaled squared norm underflows to zero or overflows (`:unsupported`).
-  Metal's host norm reductions do not yet have CPU's scaling protection.
-- **Reproducibility.** A column's result is independent of the other
-  columns in the block.
+- `ApxChol.factor` returns an `ExportedFactor` with `L::SparseMatrixCSC{Float32,Int64}`
+  (apxchol's native values) and `p`, the LinearAlgebra convention
+  (`A[p, p] ≈ L L'`). 0.3 returned `(L, perm)` with `perm = invperm(p)`;
+  destructuring the new type throws. `ApxChol.permutation` is now `ApxChol.ordering`
+  and returns `p`.
+- `solve` and `solve!` are no longer exported: use `S \ b` and `ldiv!`, or
+  `ApxChol.solve!`, or `using ApxChol: solve!`.
+- `backend` defaults to `:auto`: on Apple silicon, inputs of more than 32,768
+  rows now solve on the GPU. Pass `backend=:cpu` to keep the CPU route.
+- The `storage` keyword is gone (apxchol has one graph layout); `factor_storage` is new.
+- Closed handles throw `InvalidStateException` instead of `ArgumentError`.
 
-See apxchol's `docs/precision.md` for the precision contract. Performance
-relative to the CPU path has not been established. CUDA is unavailable on
-macOS.
+## Pinned revision
+
+`deps/apxchol.pin` names the immutable apxchol commit the package builds:
+currently the head of [AlgOptGroup/apxchol#3](https://github.com/AlgOptGroup/apxchol/pull/3)
+on [samtalki/apxchol](https://github.com/samtalki/apxchol). It moves to
+`AlgOptGroup/apxchol` once that pull request merges; no branch name determines
+the build.
 
 ## Distribution status
 
-The source build is intended for development and integration testing. A
-registered package should replace it with platform artifacts built through
-BinaryBuilder and an `apxchol_jll` dependency.
+The source build is for development and integration testing. A registered
+package should replace it with platform artifacts built through BinaryBuilder
+and an `apxchol_jll` dependency; the library handle is one constant in
+`src/capi.jl`.
 
 ## License
 
