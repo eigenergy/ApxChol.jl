@@ -1,7 +1,7 @@
 name = "ApxChol"
 uuid = "335b3f1e-a274-4453-ae68-4128a65cdf9b"
 authors = ["Samuel Talkington"]
-version = "0.3.0"
+version = "0.4.0"
 
 [deps]
 LLVMOpenMP_jll = "1d63c593-3942-5779-bab2-d838dc0a180e"
@@ -10,6 +10,7 @@ LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 
 [compat]
+Aqua = "0.8"
 Krylov = "0.9, 0.10"
 LLVMOpenMP_jll = "18, 19, 20, 21, 22, 23"
 Libdl = "1"
@@ -19,8 +20,9 @@ Test = "1"
 julia = "1.10"
 
 [extras]
+Aqua = "4c88cf16-eb10-579e-8560-4a9242c79595"
 Krylov = "ba0b0d4f-ebba-5204-a429-3ac8c609bfb7"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [targets]
-test = ["Krylov", "Test"]
+test = ["Aqua", "Krylov", "Test"]

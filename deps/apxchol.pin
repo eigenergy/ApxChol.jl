@@ -1,4 +1,4 @@
-# Immutable source for the C ABI, CPU exit certification and Metal backend.
-# Move to AlgOptGroup/apxchol after the upstream integration is accepted.
+# The apxchol revision this package builds: the C ABI of AlgOptGroup/apxchol
+# PR #3 (samtalki/apxchol branch c-abi). Move to AlgOptGroup/apxchol once it merges.
 repository=https://github.com/samtalki/apxchol.git
-revision=0f33bb33900ab25c81a494c617c5723143ad4117
+revision=5c8d4e5b336204e4e829c153b24ce5b576438a03

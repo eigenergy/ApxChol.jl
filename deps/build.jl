@@ -17,13 +17,7 @@ function read_pin(path)
     return pin
 end
 
-function git_revision(dir)
-    try
-        return readchomp(`git -C $dir rev-parse HEAD`)
-    catch
-        return "unknown"
-    end
-end
+git_revision(dir) = try readchomp(`git -C $dir rev-parse HEAD`) catch; "unknown" end
 
 function source_directory(pin)
     configured = get(ENV, "APXCHOL_SOURCE_DIR", "")
@@ -45,29 +39,34 @@ function source_directory(pin)
 end
 
 pin = read_pin(joinpath(DEPS, "apxchol.pin"))
+from_pin = isempty(get(ENV, "APXCHOL_SOURCE_DIR", ""))
 source = source_directory(pin)
-for required in ("src/factorization.cpp", "src/operator_class.cpp", "src/solve.cpp",
-                 "src/c_api.cpp", "include/apxchol/c_api.h",
-                 "include/apxchol/version.h.in", "cmake/apxchol_native_arch.cmake")
+for required in ("src/c_api.cpp", "include/apxchol/c_api.h", "include/apxchol/version.h.in",
+                 "cmake/apxchol_core.cmake")
     isfile(joinpath(source, required)) || error("apxchol source at $source lacks $required")
 end
 revision = git_revision(source)
 
 cmake = Sys.which("cmake")
 cmake === nothing && error("CMake (>= 3.20) is required to build ApxChol.jl")
+ninja = Sys.which("ninja") === nothing ? `` : `-G Ninja`
 
 build = joinpath(DEPS, "build", "libapxchol")
 prefix = joinpath(DEPS, "usr")
+rm(build; force=true, recursive=true)
 rm(prefix; force=true, recursive=true)
-mkpath(build)
 
-omp_include = joinpath(LLVMOpenMP_jll.artifact_dir, "include")
-omp_library = LLVMOpenMP_jll.libomp_path
-short_revision = revision == "unknown" ? revision : revision[1:7]
-run(`$cmake -S $DEPS -B $build -DCMAKE_BUILD_TYPE=Release
-     -DAPXCHOL_SOURCE_DIR=$source -DAPXCHOL_GIT_SHA=$short_revision
-     -DAPXCHOL_JL_OPENMP_INCLUDE_DIR=$omp_include
-     -DAPXCHOL_JL_OPENMP_LIBRARY=$omp_library
+# Apple silicon builds the Metal backend; elsewhere the CPU route only.
+device = Sys.isapple() && Sys.ARCH === :aarch64 ? "METAL" : "CPU"
+# LLVMOpenMP_jll is the one OpenMP runtime: its header and library, with the
+# compile flag only, so no compiler links its own runtime (never libgomp).
+omp_flags = Sys.isapple() ? "-Xclang -fopenmp" : "-fopenmp"
+run(`$cmake -S $DEPS -B $build $ninja -DCMAKE_BUILD_TYPE=Release
+     -DAPXCHOL_SOURCE_DIR=$source -DAPXCHOL_GIT_SHA=$(first(revision, 7))
+     -DAPXCHOL_DEVICE=$device -DCMAKE_DISABLE_FIND_PACKAGE_Eigen3=ON
+     -DOpenMP_CXX_FLAGS=$omp_flags -DOpenMP_CXX_LIB_NAMES=omp
+     -DOpenMP_omp_LIBRARY=$(LLVMOpenMP_jll.libomp_path)
+     -DOpenMP_CXX_INCLUDE_DIR=$(joinpath(LLVMOpenMP_jll.artifact_dir, "include"))
      -DCMAKE_INSTALL_PREFIX=$prefix`)
 run(`$cmake --build $build --config Release --parallel`)
 run(`$cmake --install $build --config Release`)
@@ -77,11 +76,12 @@ isfile(library) || error("libapxchol was not installed at $library")
 cache = readlines(joinpath(build, "CMakeCache.txt"))
 compiler_line = findfirst(l -> startswith(l, "CMAKE_CXX_COMPILER:"), cache)
 compiler = compiler_line === nothing ? "unknown" : split(cache[compiler_line], '='; limit=2)[2]
-metal = any(l -> startswith(l, "CMAKE_OBJCXX_COMPILER:"), cache) ? "on" : "off"
 open(joinpath(prefix, "build_info.txt"), "w") do io
-    println(io, "apxchol_source=", isempty(get(ENV, "APXCHOL_SOURCE_DIR", "")) ? pin["repository"] : source)
+    println(io, "apxchol_source=", from_pin ? "pin" : source)
+    println(io, "apxchol_repository=", from_pin ? pin["repository"] : source)
     println(io, "apxchol_revision=", revision)
-    println(io, "libomp=", omp_library)
+    println(io, "include_dir=", joinpath(source, "include"))
+    println(io, "device=", device)
     println(io, "compiler=", compiler)
-    println(io, "metal=", metal)
+    println(io, "libomp=", LLVMOpenMP_jll.libomp_path)
 end
