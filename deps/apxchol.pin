@@ -1,4 +1,4 @@
 # The apxchol revision this package builds: the C ABI of AlgOptGroup/apxchol
 # PR #3 (samtalki/apxchol branch c-abi). Move to AlgOptGroup/apxchol once it merges.
 repository=https://github.com/samtalki/apxchol.git
-revision=5c8d4e5b336204e4e829c153b24ce5b576438a03
+revision=221081211974d698c328a6439dfd5b07e393a026

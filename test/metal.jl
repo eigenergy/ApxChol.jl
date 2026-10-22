@@ -53,36 +53,51 @@
         end
     end
 
-    @testset "preconditioner application agrees with the CPU's" begin
+    @testset "preconditioner: a fixed map on the GPU; an adopted host factor applies as on the CPU" begin
         A = grid_laplacian(30, 30; shift=0.05)
-        r = compatible_rhs(size(A, 1)) .+ 0.3
-        F = ApxCholSolver(A; seed=11, threads=1)
-        G = ApxCholSolver(A; seed=11, threads=1, backend=:metal)
-        @test ApxChol.ordering(F) == ApxChol.ordering(G)    # same host factorization
-        zf = ApxChol.aspreconditioner(F) \ r
-        zg = ApxChol.aspreconditioner(G) \ r
-        @test norm(zg - zf) / norm(zf) < 1e-5
+        b = compatible_rhs(size(A, 1)) .+ 0.3
+        G = ApxCholSolver(A; seed=11, backend=:metal)
+        P = ApxChol.aspreconditioner(G)
+        @test bits(P \ b) == bits(P \ b)
+        x, st = Krylov.cg(A, b; M=P, ldiv=true, rtol=1e-10, atol=0.0)
+        @test st.solved && relres(A, x, b) < 1e-8
+        _, plain = Krylov.cg(A, b; rtol=1e-10, atol=0.0)
+        @test st.niter < plain.niter
+        F = ApxCholFactor(A; seed=11, threads=1)
+        C = ApxCholSolver(A, F; threads=1)
+        H = ApxCholSolver(A, F; backend=:metal)
+        @test ApxChol.ordering(H) == ApxChol.ordering(C) == ApxChol.ordering(F)
+        zc = ApxChol.aspreconditioner(C) \ b
+        zh = ApxChol.aspreconditioner(H) \ b
+        @test norm(zh - zc) / norm(zc) < 1e-5
     end
 
-    @testset "factor reuse: bit identity on the own matrix, a nearby operator" begin
+    @testset "factor reuse: adoptions agree bit for bit; a GPU-built factor round-trips" begin
         for shift in (0.0, 0.05)
             A = grid_laplacian(30, 30; shift)
             n = size(A, 1)
             F = ApxCholFactor(A; seed=11, threads=1)
-            G = ApxCholSolver(A; backend=:metal, seed=11, threads=1, keep_factor=true)
-            H = ApxCholSolver(A, F; backend=:metal)
-            @test ApxChol.stats(H).backend == :metal
-            @test ApxChol.factor(ApxCholFactor(G)) == ApxChol.factor(F)
+            H1 = ApxCholSolver(A, F; backend=:metal)
+            H2 = ApxCholSolver(A, F; backend=:metal)
+            @test ApxChol.stats(H1).backend == :metal && ApxChol.ordering(H1) == ApxChol.ordering(F)
             B = hcat(compatible_rhs(n), compatible_rhs(n; salt=3) .+ shift, zeros(n))
-            RG, RH = ApxChol.solve(G, B), ApxChol.solve(H, B)
-            @test all(RH.converged) && bits(RG.X) == bits(RH.X) && RG.iterations == RH.iterations
+            R1, R2 = ApxChol.solve(H1, B), ApxChol.solve(H2, B)
+            @test all(R1.converged) && bits(R1.X) == bits(R2.X) && R1.iterations == R2.iterations
+            # The GPU builds its own factor; a solver adopting a copy of it is the same solver.
+            G = ApxCholSolver(A; backend=:metal, seed=11, keep_factor=true)
+            fG = ApxChol.factor(G)
+            @test ApxChol.stats(G).factor_nnz == nnz(fG.L) && fG.p == ApxChol.ordering(G)
+            M = ApxCholSolver(A, ApxCholFactor(G); backend=:metal, keep_factor=true)
+            @test ApxChol.stats(M).backend == :metal && ApxChol.factor(M) == fG
+            RG, RM = ApxChol.solve(G, B), ApxChol.solve(M, B)
+            @test all(RG.converged) && all(RM.converged)
             A2 = reweighted(A; shift)
             S = ApxCholSolver(A2, F; backend=:metal, rtol=1e-10, maxiter=1000)
             b = compatible_rhs(n; salt=4)
             r = ApxChol.solve(S, b)
             @test r.converged && relres(A2, r.x, b) < 1e-10
             @test relres(A2, r.x, b) ≈ r.relative_residual rtol = 1e-6
-            foreach(close, (F, G, H, S))
+            foreach(close, (F, H1, H2, G, M, S))
         end
         A = grid_laplacian(12, 15)
         F = ApxCholFactor(ApxCholSolver(A; backend=:metal, keep_factor=true))
@@ -90,6 +105,16 @@
         @test ApxChol.solve(ApxCholSolver(A, F), compatible_rhs(size(A, 1); salt=6)).converged
         e = caught(() -> ApxCholSolver(grid_laplacian(12, 15; shift=0.1), F; backend=:metal))
         @test e isa ApxCholError && e.status == :invalid_argument
+    end
+
+    @testset "options the Metal setup cannot take" begin
+        A = grid_laplacian(12, 11)
+        e = caught(() -> ApxCholSolver(A; backend=:metal, sampler=:trace_cycle))
+        @test e isa ApxCholError && e.status == :unsupported && occursin("Metal", e.message)
+        big = grid_laplacian(182, 182)                   # 33,124 rows: AUTO would pick Metal
+        S = ApxCholSolver(big; sampler=:trace_cycle)
+        @test S.backend == :cpu && ApxChol.stats(S).backend == :cpu
+        close(S)
     end
 
     @testset "factor storage and honest non-convergence" begin

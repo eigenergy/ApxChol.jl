@@ -86,8 +86,9 @@ end
 
 An error status from apxchol: `:invalid_argument`, `:invalid_operator` (the
 matrix violates the Laplacian/SDDM/M-matrix contract), `:no_factor_values`,
-`:unsupported` (a backend this build or machine lacks, or an input the
-backend cannot represent), `:out_of_memory` or `:internal_error`.
+`:unsupported` (a backend this build or machine lacks, an input or option the
+backend cannot take, or a solution outside the finite range), `:out_of_memory`
+or `:internal_error`.
 """
 struct ApxCholError <: Exception
     status::Symbol

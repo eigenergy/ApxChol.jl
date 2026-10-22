@@ -116,6 +116,10 @@ end
 Solve `A x = b` (every column of `A X = B`) into `x` (`X`), optionally from the
 initial guess `x0` (`X0`). `rtol` and `maxiter` default to the solver's.
 Non-convergence is reported in the result, not thrown. `x` may be `b` itself.
+apxchol rescales extreme inputs internally: a `b` and `x0` that cannot share
+one power-of-two scale throw `ApxCholError(:invalid_argument)`, and a solution
+outside the finite range throws `ApxCholError(:unsupported)` and leaves `x`
+unspecified.
 
 Contiguous `Float64` arrays, views included, are passed to apxchol in place:
 a warmed-up `solve!` on them allocates nothing. Other arrays are converted.

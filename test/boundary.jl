@@ -47,9 +47,31 @@
         @test all(R.converged)
         @test_throws ApxCholError ApxChol.solve(S, [NaN, 0.0])
         @test_throws ApxCholError ApxChol.apply!(zeros(2), S, [Inf, 0.0])
-        # A guess far beyond b's scale cannot be represented in the CPU solve.
-        e = caught(() -> ApxChol.solve(S, b; x0=[1e300, 1e300]))
-        @test e isa ApxCholError && e.status == :unsupported
+        # A huge guess on a normal b is solved (apxchol rescales b and x0 together)
+        # with a finite certified residual; a pair that cannot share one scale is not.
+        r = ApxChol.solve(S, b; x0=fill(0x1p300, 2))
+        @test all(isfinite, r.x) && isfinite(r.relative_residual)
+        @test r.converged == (r.relative_residual < 1e-8)
+        @test r.relative_residual ≈ norm(b - A * r.x) / norm(b) rtol = 1e-12
+        e = caught(() -> ApxChol.solve(S, 1e-200 .* b; x0=1e200 .* b))
+        @test e isa ApxCholError && e.status == :invalid_argument
+        @test occursin("scaling range", e.message)
         close(S)
+    end
+
+    @testset "unrepresentable solutions are unsupported" begin
+        for d in (1e-30, 1e30)
+            A = sparse(d * I, 4, 4)
+            S = ApxCholSolver(A; backend=:cpu, threads=1)
+            b = fill(d < 1 ? 1e300 : 1e-300, 4)             # x = b / d is not finite or is zero
+            e = caught(() -> ApxChol.solve(S, b))
+            @test e isa ApxCholError && e.status == :unsupported && !isempty(e.message)
+            @test_throws ApxCholError S \ b
+            B = hcat(fill(d, 4), b)
+            e = caught(() -> ApxChol.solve(S, B))
+            @test e isa ApxCholError && e.status == :unsupported
+            @test ApxChol.solve(S, B[:, 1]).x ≈ ones(4) rtol = 1e-8
+            close(S)
+        end
     end
 end

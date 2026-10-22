@@ -79,17 +79,19 @@ compatible with every connected component.
 
 Keywords left unset take apxchol's defaults (see [`ApxChol.options`](@ref)):
 - `backend`: `:auto` chooses the route as apxchol's C++ solver does (CPU for at
-  most 32,768 rows and when adopting a factor, otherwise Metal when available
-  and the operator is within its range), `:cpu` or `:metal`;
-  [`ApxChol.stats`](@ref) reports the route chosen.
+  most 32,768 rows, when adopting a factor, and for operators or options the
+  Metal setup cannot take; otherwise Metal when available), `:cpu` or `:metal`
+  (`ApxCholError(:unsupported)` for what Metal cannot take);
+  [`ApxChol.stats`](@ref) reports the route chosen. A Metal solver builds its
+  factor on the GPU, so it differs from the CPU route's for the same seed.
 - `rtol`, `maxiter`, `stagnation_window` (0 disables): every solve's defaults.
 - `seed`, `sampler` (`:gks`, `:trace_cycle`), `partitioner` (`:block_greedy`,
   `:priority_greedy`, `:baumann_kyng`), `degree_quantile`,
   `exact_clique_max_degree`, `omp_threshold`: the factorization.
 - `factor_storage`: the triangular solves' storage, `Float16`, `Float32` or
   `nothing` (`ENV["APXCHOL_FACTOR_STORAGE"]`, then the backend's default).
-- `threads`: the OpenMP team of every call on this solver (0 inherits the
-  calling thread's limit).
+- `threads`: a ceiling on apxchol's OpenMP workers in every call on this
+  solver (0 inherits the calling thread's limit).
 - `keep_factor`: retain the factor's values for [`ApxChol.factor`](@ref) and
   [`ApxCholFactor(S)`](@ref ApxCholFactor).
 
@@ -119,8 +121,8 @@ end
 
 One approximate factorization, without a solver, for any number of
 [`ApxCholSolver(A, F)`](@ref ApxCholSolver) to adopt. The first form factorizes
-`A` with the factorization keywords of `ApxCholSolver`; the second copies the
-factor of a solver created with `keep_factor=true`.
+`A` on the CPU with the factorization keywords of `ApxCholSolver`; the second
+copies the factor of a solver created with `keep_factor=true`.
 
 A factor is immutable and always keeps its values. Solvers adopt their own
 copy, so a factor and its solvers can be closed in any order. Reads of one

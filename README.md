@@ -6,8 +6,7 @@ Laplacian, SDDM and lumpable M-matrix systems. The package builds `libapxchol`
 from a pinned apxchol revision and calls it only through apxchol's C ABI
 (`include/apxchol/c_api.h`), which it mirrors function for function.
 
-This repository is private while the C ABI and binary distribution are under
-review. (It was previously named ApproxCholesky.jl; the package UUID is unchanged.)
+The package was previously named ApproxCholesky.jl; its UUID is unchanged.
 
 ## Build
 
@@ -57,11 +56,13 @@ included, are handed to apxchol in place, and a warmed-up `solve!`, `ldiv!` or
 
 `relative_residual` is ‖b − A x‖/‖b‖ of the returned `x`, recomputed by apxchol
 in FP64 from the original operator on every backend; `converged` means it is
-below `rtol`. A right-hand side of any scale is solved: far from unit scale
-apxchol solves the exactly power-of-two scaled problem. `solve` and `solve!`
-report non-convergence in their result; `\` and `ldiv!` have no flag to return
-and throw `NotConvergedError(result)` instead. The returned iterate is always
-written.
+below `rtol`. Right-hand sides of any scale are solved: apxchol rescales an
+extreme `b` and `x0` by one exact power of two internally. A `b` and `x0` that
+cannot share a scale throw `ApxCholError(:invalid_argument)`; a solution outside
+the finite range throws `ApxCholError(:unsupported)` and leaves `x` unspecified.
+`solve` and `solve!` report non-convergence in their result; `\` and `ldiv!`
+have no flag to return and throw `NotConvergedError(result)` instead. Otherwise
+the returned iterate is always written.
 
 ## Factor reuse and export
 
@@ -79,9 +80,10 @@ ApxChol.ordering(S)                  # f.p, always available
 Each solver adopts its own copy of the factor, so factors and solvers close in
 any order. `ApxCholSolver(A2, F)` takes only the solve keywords; `A2` must have
 `F`'s size. A Laplacian factor refuses an SDDM operator; an SDDM factor may
-precondition a Laplacian, whose solution is then not centred. On its own
-matrix, `ApxCholSolver(A, ApxCholFactor(A))` is bit for bit the solver
-`ApxCholSolver(A)` builds.
+precondition a Laplacian, whose solution is then not centred. On the CPU route,
+`ApxCholSolver(A, ApxCholFactor(A))` is bit for bit the solver `ApxCholSolver(A)`
+builds. A Metal solver builds its own factor on the GPU (see below), so there
+only solvers adopting the same factor agree bit for bit.
 
 ## Options
 
@@ -90,12 +92,12 @@ unset keywords take apxchol's defaults, which `ApxChol.options(S)` reports.
 
 | keyword | default | meaning |
 |---|---|---|
-| `backend` | `:auto` | `:auto` chooses as apxchol's C++ solver does (CPU for ≤ 32,768 rows and when adopting a factor, else Metal when usable); `:cpu`; `:metal` |
+| `backend` | `:auto` | `:auto` chooses as apxchol's C++ solver does (CPU for ≤ 32,768 rows, when adopting a factor, and for operators or options Metal cannot take; else Metal when usable); `:cpu`; `:metal` |
 | `rtol` | `1e-8` | relative residual target |
 | `maxiter` | `200` | PCG iteration limit |
 | `stagnation_window` | `50` | stop if the residual has not halved in this many iterations (0 disables) |
 | `factor_storage` | `nothing` | triangular-solve storage `Float16` or `Float32`; `nothing` reads `APXCHOL_FACTOR_STORAGE`, then the backend default (`Float32` on CPU and Metal) |
-| `threads` | `0` | OpenMP team of every call on the solver; 0 inherits the calling thread's |
+| `threads` | `0` | ceiling on apxchol's OpenMP workers in every call on the handle; 0 inherits the calling thread's limit |
 | `keep_factor` | `false` | retain the factor values for `ApxChol.factor` and `ApxCholFactor(S)` |
 | `seed` | `42` | sampling seed |
 | `sampler` | `:gks` | also `:trace_cycle` |
@@ -175,12 +177,17 @@ residual bytes (`test/digest.jl`).
 
 ## Apple silicon and Metal
 
-`ApxChol.backend_available(:metal)` reports whether the GPU is usable. Metal
-factorizes on the host exactly as the CPU route does and solves one right-hand
-side at a time on the GPU with double-float Krylov vectors (about 48 bits);
-`relative_residual` is recomputed in FP64. `factor_storage=Float16` stores the
-triangular-solve factor values in FP16. `ApxCholSolver(A, F; backend=:metal)` adopts a host factor.
-See apxchol's `docs/precision.md` for the precision contract.
+`ApxChol.backend_available(:metal)` reports whether the GPU is usable. A Metal
+solver builds its factor on the GPU (apxchol's block-greedy GKS setup, degree
+quantile 0.2 by default), so its factor and ordering differ from the CPU
+route's for the same seed. `ApxCholFactor` always factorizes on the CPU, and
+`ApxCholSolver(A, F; backend=:metal)` adopts that host factor. Solves run one
+right-hand side at a time on the GPU with double-float Krylov vectors (about
+48 bits); `relative_residual` is recomputed in FP64. `factor_storage=Float16`
+stores the triangular-solve factor values in FP16. Options the Metal setup
+cannot take (for example `sampler=:trace_cycle`) throw
+`ApxCholError(:unsupported)` under `backend=:metal`; `:auto` uses the CPU for
+them. See apxchol's `docs/precision.md` for the precision contract.
 
 ## Migrating from 0.3
 
