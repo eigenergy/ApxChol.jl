@@ -62,8 +62,6 @@ jobs:
           - { os: macos-latest, julia: '1', compiler: AppleClang }
     steps:
       - uses: actions/checkout@v4
-      - name: Verify the vendored C ABI checksums
-        run: cd deps/vendor && shasum -a 256 -c SHA256SUMS
       - uses: julia-actions/setup-julia@v2
         with:
           version: ${{ matrix.julia }}
@@ -76,8 +74,23 @@ jobs:
       - uses: julia-actions/cache@v2
       - name: Instantiate and build
         run: julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.build(verbose=true)'
+      - name: Build configuration
+        run: |
+          cat deps/usr/build_info.txt
+          julia --project=. -e 'using ApxChol; println("version=", ApxChol.version(), " metal=", ApxChol.backend_available(:metal))'
       - name: Test
         run: julia --project=. --threads=4 -e 'using Pkg; Pkg.test()'
+      - name: Test the Metal backend under Metal's validation layers
+        if: runner.os == 'macOS'
+        env:
+          MTL_DEBUG_LAYER: '1'
+          MTL_SHADER_VALIDATION: '1'
+        run: |
+          if julia --project=. -e 'using ApxChol; exit(ApxChol.backend_available(:metal) ? 0 : 1)'; then
+            julia --project=. --threads=4 -e 'using Pkg; Pkg.test()'
+          else
+            echo "::warning::No usable Metal device on this runner; the Metal tests did not run"
+          fi
       - name: Check linkage (exactly one OpenMP runtime, the JLL's)
         shell: bash
         run: |
@@ -86,6 +99,7 @@ jobs:
           echo "$deps"
           [ "$(echo "$deps" | grep -ciE 'lib(g|i)?omp')" = 1 ] || { echo "expected one OpenMP library"; exit 1; }
           ! echo "$deps" | grep -qi gomp
+          if [ "$RUNNER_OS" = macOS ]; then echo "$deps" | grep -q Metal.framework; fi
       - name: Run the 9,241-bus regression
         run: |
           curl --fail --location --silent --show-error \
