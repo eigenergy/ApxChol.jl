@@ -7,18 +7,32 @@ function fnv1a(v::AbstractVector)
 end
 hex(x::Unsigned) = string(x; base=16, pad=16)
 
-@testset "Julia and C agree byte for byte on the same library" begin
-    cc = Sys.which("cc")
-    include_dir = get(ApxChol.build_info(), "include_dir", "")
-    if cc === nothing || !isdir(include_dir)
-        @warn "No C compiler or apxchol include directory; the C comparison did not run"
+# test/digest/digest.cpp against the installed core in deps/usr, with the
+# compiler and OpenMP runtime the module was built with.
+function build_digest(dir)
+    cmake = Sys.which("cmake")
+    info = ApxChol.build_info()
+    cmake === nothing && return nothing
+    omp = Sys.isapple() ? "-Xclang -fopenmp" : "-fopenmp"
+    build = joinpath(dir, "build")
+    run(pipeline(`$cmake -S $(joinpath(@__DIR__, "digest")) -B $build -DCMAKE_BUILD_TYPE=Release
+                  -DCMAKE_CXX_COMPILER=$(info["compiler"])
+                  -DCMAKE_PREFIX_PATH=$(dirname(dirname(ApxChol.libapxchol_jl)))
+                  -DOpenMP_CXX_FLAGS=$omp -DOpenMP_CXX_LIB_NAMES=omp
+                  -DOpenMP_omp_LIBRARY=$(LLVMOpenMP_jll.libomp_path)
+                  -DOpenMP_CXX_INCLUDE_DIR=$(joinpath(LLVMOpenMP_jll.artifact_dir, "include"))`;
+                 stdout=devnull))
+    run(pipeline(`$cmake --build $build`; stdout=devnull))
+    return joinpath(build, "digest")
+end
+
+@testset "Julia and apxchol's own C++ agree byte for byte" begin
+    dir = mktempdir()
+    exe = build_digest(dir)
+    if exe === nothing
+        @warn "No CMake; the C++ comparison did not run"
         @test_broken false
     else
-        dir = mktempdir()
-        exe = joinpath(dir, "digest")
-        libdir = dirname(ApxChol.libapxchol)
-        run(`$cc -std=c11 -I$include_dir $(joinpath(@__DIR__, "digest.c")) -L$libdir -lapxchol
-             -Wl,-rpath,$libdir -o $exe`)
         for shift in (0.0, 0.03)
             A = grid_laplacian(23, 17; shift)
             n = size(A, 1)

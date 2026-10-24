@@ -52,8 +52,7 @@ function main(path::String)
 
     # The settings this regression has always used (not the library defaults).
     for threads in (1, 2, 4, 8)
-        solver = ApxCholSolver(matrix; rtol=1e-8, maxiter=1000, stagnation_window=0,
-                               seed=7, threads=threads)
+        solver = ApxCholSolver(matrix; rtol=1e-8, maxiter=1000, seed=7, threads=threads)
         result = ApxChol.solve(solver, rhs)
         residual = norm(matrix * result.x - rhs) / norm(rhs)
         result.converged || error("$threads-thread solve did not converge")

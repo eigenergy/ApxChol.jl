@@ -22,26 +22,43 @@ end
 
 # ── Options ──────────────────────────────────────────────────────────────────
 
-# apxchol_options_default, read once by __init__.
-const DEFAULTS = Ref{COptions}()
+"""
+The options of one handle, as deps/apxchol_jl.cpp takes them (in this order).
+"""
+struct Options
+    backend::Int32
+    tol::Float64
+    max_iter::Int32
+    seed::UInt32
+    threads::Int32
+    sampler::Int32
+    partitioner::Int32
+    keep_factor_values::Int32
+    degree_quantile::Float64
+    exact_clique_max_degree::UInt64
+    omp_threshold::UInt64
+    factor_storage::Int32
+end
+fields(o::Options) = ntuple(i -> getfield(o, i), Val(fieldcount(Options)))
+
+# apxchol::solve_options' defaults, read once by __init__.
+const DEFAULTS = Ref{Options}()
 
 pick(value, default) = value === nothing ? default : value
 
 # `base` with every keyword that is not `nothing` applied (factor_storage is
-# always given: `nothing` is its AUTO value). Values apxchol validates
+# always given: `nothing` is its automatic value). Values apxchol validates
 # (positivity, ranges) are left to it; type conversions throw here.
-function make_options(base::COptions; backend=nothing, rtol=nothing, maxiter=nothing,
-                      stagnation_window=nothing, seed=nothing, threads=nothing, sampler=nothing,
-                      partitioner=nothing, keep_factor=nothing, degree_quantile=nothing,
+function make_options(base::Options; backend=nothing, rtol=nothing, maxiter=nothing,
+                      seed=nothing, threads=nothing, sampler=nothing, partitioner=nothing,
+                      keep_factor=nothing, degree_quantile=nothing,
                       exact_clique_max_degree=nothing, omp_threshold=nothing,
                       factor_storage=storage_type(base.factor_storage))
     b = base
-    return COptions(
-        b.struct_size,
+    return Options(
         backend === nothing ? b.backend : code(BACKENDS, backend, "backend"),
         Float64(pick(rtol, b.tol)),
         Int32(pick(maxiter, b.max_iter)),
-        Int32(pick(stagnation_window, b.stagnation_window)),
         UInt32(pick(seed, b.seed)),
         Int32(pick(threads, b.threads)),
         sampler === nothing ? b.sampler : code(SAMPLERS, sampler, "sampler"),
@@ -55,7 +72,7 @@ end
 
 # A factor's options: its factorization fields, with apxchol's defaults for
 # everything a solve reads, so solvers adopting it start from those.
-factorization_options(o::COptions) =
+factorization_options(o::Options) =
     make_options(DEFAULTS[]; seed=o.seed, threads=o.threads, degree_quantile=o.degree_quantile,
                  exact_clique_max_degree=o.exact_clique_max_degree, omp_threshold=o.omp_threshold,
                  sampler=symbol(SAMPLERS, o.sampler), partitioner=symbol(PARTITIONERS, o.partitioner))
@@ -63,10 +80,10 @@ factorization_options(o::COptions) =
 # ── Handles ──────────────────────────────────────────────────────────────────
 
 """
-    ApxCholSolver(A; backend=:auto, rtol, maxiter, stagnation_window, seed, sampler,
-                  partitioner, degree_quantile, exact_clique_max_degree, omp_threshold,
+    ApxCholSolver(A; backend=:auto, rtol, maxiter, seed, sampler, partitioner,
+                  degree_quantile, exact_clique_max_degree, omp_threshold,
                   factor_storage=nothing, threads=0, keep_factor=false)
-    ApxCholSolver(A, F::ApxCholFactor; backend=:auto, rtol, maxiter, stagnation_window,
+    ApxCholSolver(A, F::ApxCholFactor; backend=:auto, rtol, maxiter,
                   factor_storage=nothing, threads=0, keep_factor=false)
 
 Factorize `A` once for any number of solves. `A` is a `SparseMatrixCSC` with
@@ -84,12 +101,14 @@ Keywords left unset take apxchol's defaults (see [`ApxChol.options`](@ref)):
   (`ApxCholError(:unsupported)` for what Metal cannot take);
   [`ApxChol.stats`](@ref) reports the route chosen. A Metal solver builds its
   factor on the GPU, so it differs from the CPU route's for the same seed.
-- `rtol`, `maxiter`, `stagnation_window` (0 disables): every solve's defaults.
+- `rtol`, `maxiter`: every solve's defaults. A solve stops at the tolerance,
+  the iteration limit or a numerical breakdown.
 - `seed`, `sampler` (`:gks`, `:trace_cycle`), `partitioner` (`:block_greedy`,
   `:priority_greedy`, `:baumann_kyng`), `degree_quantile`,
-  `exact_clique_max_degree`, `omp_threshold`: the factorization.
+  `exact_clique_max_degree`, `omp_threshold`: the factorization
+  (`degree_quantile = -1` chooses the route's own cap).
 - `factor_storage`: the triangular solves' storage, `Float16`, `Float32` or
-  `nothing` (`ENV["APXCHOL_FACTOR_STORAGE"]`, then the backend's default).
+  `nothing` (the backend's default, `Float32` on the CPU and Metal).
 - `threads`: a ceiling on apxchol's OpenMP workers in every call on this
   solver (0 inherits the calling thread's limit).
 - `keep_factor`: retain the factor's values for [`ApxChol.factor`](@ref) and
@@ -105,13 +124,15 @@ The solver owns native memory, released by `close` or its finalizer. Calls on
 one solver are serialized; distinct solvers run concurrently.
 """
 mutable struct ApxCholSolver
-    ptr::Ptr{Cvoid}
+    ptr::SolverPtr
     const n::Int
-    const options::COptions           # as requested (backend may be :auto)
+    const options::Options            # as requested (backend may be :auto)
     const backend::Symbol             # the route chosen
     const lock::ReentrantLock         # held for every native call
-    const info::Base.RefValue{CSolveInfo}  # written only under `lock`
-    const error_buffer::Vector{UInt8}      # written only under `lock`
+    # One solve's iterations, residual and convergence, written only under `lock`.
+    const iterations::Vector{Int64}
+    const residuals::Vector{Float64}
+    const converged::Vector{Int32}
 end
 
 """
@@ -130,9 +151,9 @@ factor (adoptions, [`ApxChol.stats`](@ref), [`ApxChol.factor`](@ref)) run
 concurrently; `close` waits for them.
 """
 mutable struct ApxCholFactor
-    ptr::Ptr{Cvoid}
+    ptr::FactorPtr
     const n::Int
-    const options::COptions           # factorization fields; solve fields are defaults
+    const options::Options            # factorization fields; solve fields are defaults
     const state::Threads.Condition    # guards ptr and readers
     readers::Int
 end
@@ -141,50 +162,39 @@ const Handle = Union{ApxCholSolver,ApxCholFactor}
 
 closed_error(H::Handle) = InvalidStateException("the $(nameof(typeof(H))) has been closed", :closed)
 
-function solver_handle(ptr::Ptr{Cvoid}, n::Int, options::COptions, buffer::Vector{UInt8})
-    route = symbol(BACKENDS, solver_stats(ptr).backend)
+function solver_handle(ptr::SolverPtr, n::Int, options::Options)
+    route = symbol(BACKENDS, native_stats(ptr).backend)
     return finalizer(destroy!, ApxCholSolver(ptr, n, options, route, ReentrantLock(),
-                                             Ref(CSolveInfo()), buffer))
+                                             zeros(Int64, 1), zeros(1), zeros(Int32, 1)))
 end
-factor_handle(ptr::Ptr{Cvoid}, n::Int, options::COptions) =
+factor_handle(ptr::FactorPtr, n::Int, options::Options) =
     finalizer(destroy!, ApxCholFactor(ptr, n, options, Threads.Condition(), 0))
 
 function ApxCholSolver(A::Operator; backend::Symbol=:auto, rtol=nothing, maxiter=nothing,
-                       stagnation_window=nothing, seed=nothing, sampler=nothing,
-                       partitioner=nothing, degree_quantile=nothing,
-                       exact_clique_max_degree=nothing, omp_threshold=nothing,
-                       factor_storage=nothing, threads::Integer=0, keep_factor::Bool=false)
+                       seed=nothing, sampler=nothing, partitioner=nothing,
+                       degree_quantile=nothing, exact_clique_max_degree=nothing,
+                       omp_threshold=nothing, factor_storage=nothing, threads::Integer=0,
+                       keep_factor::Bool=false)
     M = operator_csc(A)
-    o = make_options(DEFAULTS[]; backend, rtol, maxiter, stagnation_window, seed, sampler,
-                     partitioner, degree_quantile, exact_clique_max_degree, omp_threshold,
-                     factor_storage, threads, keep_factor)
-    out = Ref{Ptr{Cvoid}}(C_NULL)
-    buffer = zeros(UInt8, ERROR_CAPACITY)
-    status = GC.@preserve M @native libapxchol.apxchol_solver_create(
-        size(M, 1)::Int64, M.colptr::Ptr{Int64}, M.rowval::Ptr{Int64}, M.nzval::Ptr{Float64},
-        1::Int32, Ref(o)::Ref{COptions}, out::Ref{Ptr{Cvoid}}, buffer::Ptr{UInt8},
-        length(buffer)::Csize_t)::Int32
-    check(status, buffer)
-    return solver_handle(out[], size(M, 1), o, buffer)
+    o = make_options(DEFAULTS[]; backend, rtol, maxiter, seed, sampler, partitioner,
+                     degree_quantile, exact_clique_max_degree, omp_threshold, factor_storage,
+                     threads, keep_factor)
+    ptr = GC.@preserve M @native Native.create_solver(
+        size(M, 1), pointer(M.colptr), pointer(M.rowval), pointer(M.nzval), NO_FACTOR, fields(o)...)
+    return solver_handle(ptr, size(M, 1), o)
 end
 
 function ApxCholSolver(A::Operator, F::ApxCholFactor; backend::Symbol=:auto, rtol=nothing,
-                       maxiter=nothing, stagnation_window=nothing, factor_storage=nothing,
-                       threads::Integer=0, keep_factor::Bool=false)
+                       maxiter=nothing, factor_storage=nothing, threads::Integer=0,
+                       keep_factor::Bool=false)
     M = operator_csc(A)
     size(M, 1) == F.n || throw(DimensionMismatch("A is $(size(M, 1))×$(size(M, 1)), the factor $(F.n)×$(F.n)"))
-    o = make_options(F.options; backend, rtol, maxiter, stagnation_window, factor_storage,
-                     threads, keep_factor)
-    out = Ref{Ptr{Cvoid}}(C_NULL)
-    buffer = zeros(UInt8, ERROR_CAPACITY)
-    status = reading(F) do fptr
-        GC.@preserve M @native libapxchol.apxchol_solver_create_from_factor(
-            size(M, 1)::Int64, M.colptr::Ptr{Int64}, M.rowval::Ptr{Int64},
-            M.nzval::Ptr{Float64}, 1::Int32, fptr::Ptr{Cvoid}, Ref(o)::Ref{COptions},
-            out::Ref{Ptr{Cvoid}}, buffer::Ptr{UInt8}, length(buffer)::Csize_t)::Int32
+    o = make_options(F.options; backend, rtol, maxiter, factor_storage, threads, keep_factor)
+    ptr = reading(F) do fptr
+        GC.@preserve M @native Native.create_solver(
+            size(M, 1), pointer(M.colptr), pointer(M.rowval), pointer(M.nzval), fptr, fields(o)...)
     end
-    check(status, buffer)
-    return solver_handle(out[], size(M, 1), o, buffer)
+    return solver_handle(ptr, size(M, 1), o)
 end
 
 function ApxCholFactor(A::Operator; seed=nothing, sampler=nothing, partitioner=nothing,
@@ -193,28 +203,20 @@ function ApxCholFactor(A::Operator; seed=nothing, sampler=nothing, partitioner=n
     M = operator_csc(A)
     o = make_options(DEFAULTS[]; seed, sampler, partitioner, degree_quantile,
                      exact_clique_max_degree, omp_threshold, threads)
-    out = Ref{Ptr{Cvoid}}(C_NULL)
-    buffer = zeros(UInt8, ERROR_CAPACITY)
-    status = GC.@preserve M @native libapxchol.apxchol_factor_create(
-        size(M, 1)::Int64, M.colptr::Ptr{Int64}, M.rowval::Ptr{Int64}, M.nzval::Ptr{Float64},
-        1::Int32, Ref(o)::Ref{COptions}, out::Ref{Ptr{Cvoid}}, buffer::Ptr{UInt8},
-        length(buffer)::Csize_t)::Int32
-    check(status, buffer)
-    return factor_handle(out[], size(M, 1), o)
+    ptr = GC.@preserve M @native Native.create_factor(
+        size(M, 1), pointer(M.colptr), pointer(M.rowval), pointer(M.nzval), o.seed, o.threads,
+        o.sampler, o.partitioner, o.degree_quantile, o.exact_clique_max_degree, o.omp_threshold)
+    return factor_handle(ptr, size(M, 1), o)
 end
 
 function ApxCholFactor(S::ApxCholSolver)
-    out = Ref{Ptr{Cvoid}}(C_NULL)
     ptr = acquire(S)
-    try
-        status = GC.@preserve S @native libapxchol.apxchol_solver_copy_factor(
-            ptr::Ptr{Cvoid}, out::Ref{Ptr{Cvoid}}, S.error_buffer::Ptr{UInt8},
-            ERROR_CAPACITY::Csize_t)::Int32
-        check(status, S.error_buffer)
+    fptr = try
+        GC.@preserve S @native Native.copy_factor(ptr)
     finally
         unlock(S.lock)
     end
-    return factor_handle(out[], S.n, factorization_options(S.options))
+    return factor_handle(fptr, S.n, factorization_options(S.options))
 end
 
 # ── Lifetime ─────────────────────────────────────────────────────────────────
@@ -222,13 +224,13 @@ end
 # Called by close (which excludes every in-flight call) and by the finalizer
 # (which runs only once the handle is unreachable, so no call is in flight).
 function destroy!(S::ApxCholSolver)
-    ptr, S.ptr = S.ptr, C_NULL
-    ptr == C_NULL || @ccall libapxchol.apxchol_solver_destroy(ptr::Ptr{Cvoid})::Cvoid
+    ptr, S.ptr = S.ptr, SolverPtr(C_NULL)
+    isnull(ptr) || Native.destroy_solver(ptr)
     return nothing
 end
 function destroy!(F::ApxCholFactor)
-    ptr, F.ptr = F.ptr, C_NULL
-    ptr == C_NULL || @ccall libapxchol.apxchol_factor_destroy(ptr::Ptr{Cvoid})::Cvoid
+    ptr, F.ptr = F.ptr, FactorPtr(C_NULL)
+    isnull(ptr) || Native.destroy_factor(ptr)
     return nothing
 end
 
@@ -249,20 +251,20 @@ function Base.close(F::ApxCholFactor)
         destroy!(F)
     end
 end
-Base.isopen(H::Handle) = H.ptr != C_NULL
+Base.isopen(H::Handle) = !isnull(H.ptr)
 
 # Locks the solver for one native call and returns its pointer; the caller
 # unlocks in a `finally` and keeps the solver rooted across the call.
 @inline function acquire(S::ApxCholSolver)
     lock(S.lock)
-    S.ptr == C_NULL && (unlock(S.lock); throw(closed_error(S)))
+    isnull(S.ptr) && (unlock(S.lock); throw(closed_error(S)))
     return S.ptr
 end
 
 # Runs f(ptr) as one of the factor's concurrent readers.
 function reading(f, F::ApxCholFactor)
     ptr = lock(F.state) do
-        F.ptr == C_NULL && throw(closed_error(F))
+        isnull(F.ptr) && throw(closed_error(F))
         F.readers += 1
         F.ptr
     end
@@ -288,24 +290,20 @@ Base.show(io::IO, F::ApxCholFactor) =
 
 # ── Introspection ────────────────────────────────────────────────────────────
 
-function solver_stats(ptr::Ptr{Cvoid})
-    out = Ref(CStats())
-    status = @native libapxchol.apxchol_solver_stats(ptr::Ptr{Cvoid}, out::Ref{CStats})::Int32
-    status == 0 || throw(ApxCholError(status_symbol(status), "apxchol_solver_stats failed"))
-    return out[]
-end
-function factor_stats(ptr::Ptr{Cvoid})
-    out = Ref(CStats())
-    status = @native libapxchol.apxchol_factor_stats(ptr::Ptr{Cvoid}, out::Ref{CStats})::Int32
-    status == 0 || throw(ApxCholError(status_symbol(status), "apxchol_factor_stats failed"))
-    return out[]
+function native_stats(ptr::Union{SolverPtr,FactorPtr})
+    backend, n, factor_nnz, lumped_offdiag, rounds, peak_graph_bytes, setup_seconds, sddm,
+        setup_max_threads, storage = @native ptr isa SolverPtr ? Native.solver_stats(ptr) :
+                                                                 Native.factor_stats(ptr)
+    return (backend=Int(backend), n=Int(n), factor_nnz=Int(factor_nnz),
+            lumped_offdiag=Int(lumped_offdiag), rounds=Int(rounds),
+            peak_graph_bytes=Int(peak_graph_bytes), setup_seconds=Float64(setup_seconds),
+            sddm=sddm == 1, setup_max_threads=Int(setup_max_threads), factor_storage=Int(storage))
 end
 
-stats_tuple(s::CStats) =
-    (backend=symbol(BACKENDS, s.backend), n=Int(s.n), factor_nnz=Int(s.factor_nnz),
-     lumped_offdiag=Int(s.lumped_offdiag), rounds=Int(s.rounds),
-     peak_graph_bytes=Int(s.peak_graph_bytes), setup_seconds=s.setup_seconds,
-     sddm=s.sddm == 1, setup_max_threads=Int(s.setup_max_threads),
+stats_tuple(s) =
+    (backend=symbol(BACKENDS, s.backend), n=s.n, factor_nnz=s.factor_nnz,
+     lumped_offdiag=s.lumped_offdiag, rounds=s.rounds, peak_graph_bytes=s.peak_graph_bytes,
+     setup_seconds=s.setup_seconds, sddm=s.sddm, setup_max_threads=s.setup_max_threads,
      factor_storage=storage_type(s.factor_storage))
 
 """
@@ -325,12 +323,12 @@ stats_tuple(s::CStats) =
 function stats(S::ApxCholSolver)
     ptr = acquire(S)
     try
-        return stats_tuple(GC.@preserve S solver_stats(ptr))
+        return stats_tuple(GC.@preserve S native_stats(ptr))
     finally
         unlock(S.lock)
     end
 end
-stats(F::ApxCholFactor) = stats_tuple(reading(factor_stats, F))
+stats(F::ApxCholFactor) = stats_tuple(reading(native_stats, F))
 
 """
     ApxChol.options(S::ApxCholSolver) -> NamedTuple
@@ -343,12 +341,12 @@ factorization options.
 function options(S::ApxCholSolver)
     o = S.options
     return (backend=symbol(BACKENDS, o.backend), rtol=o.tol, maxiter=Int(o.max_iter),
-            stagnation_window=Int(o.stagnation_window), factor_storage=storage_type(o.factor_storage),
+            factor_storage=storage_type(o.factor_storage),
             threads=Int(o.threads), keep_factor=o.keep_factor_values == 1,
             factorization_tuple(o)...)
 end
 options(F::ApxCholFactor) = (threads=Int(F.options.threads), factorization_tuple(F.options)...)
-factorization_tuple(o::COptions) =
+factorization_tuple(o::Options) =
     (seed=Int(o.seed), sampler=symbol(SAMPLERS, o.sampler),
      partitioner=symbol(PARTITIONERS, o.partitioner), degree_quantile=o.degree_quantile,
      exact_clique_max_degree=Int(o.exact_clique_max_degree), omp_threshold=Int(o.omp_threshold))
@@ -368,26 +366,17 @@ end
 Base.:(==)(a::ExportedFactor, b::ExportedFactor) = a.p == b.p && a.L == b.L
 Base.hash(f::ExportedFactor, h::UInt) = hash(f.L, hash(f.p, hash(ExportedFactor, h)))
 
-# perm[v] is v's elimination position (C ABI); p = invperm(perm).
-function export_arrays(H::Handle, ptr::Ptr{Cvoid}, buffer::Vector{UInt8}, values::Bool)
-    nnz = values ? Int((H isa ApxCholSolver ? solver_stats(ptr) : factor_stats(ptr)).factor_nnz) : 0
+# perm[v] is v's elimination position; p = invperm(perm).
+function export_arrays(H::Handle, ptr::Union{SolverPtr,FactorPtr}, values::Bool)
+    nnz = values ? native_stats(ptr).factor_nnz : 0
     colptr = values ? Vector{Int64}(undef, H.n + 1) : Int64[]
     rowval = Vector{Int64}(undef, nnz)
     nzval = Vector{Float32}(undef, nnz)
     perm = Vector{Int64}(undef, H.n)
-    null(v) = values ? pointer(v) : Ptr{eltype(v)}(C_NULL)
-    status = GC.@preserve colptr rowval nzval perm if H isa ApxCholSolver
-        @native libapxchol.apxchol_solver_export_factor(
-            ptr::Ptr{Cvoid}, 1::Int32, null(colptr)::Ptr{Int64}, null(rowval)::Ptr{Int64},
-            null(nzval)::Ptr{Float32}, perm::Ptr{Int64}, buffer::Ptr{UInt8},
-            length(buffer)::Csize_t)::Int32
-    else
-        @native libapxchol.apxchol_factor_export(
-            ptr::Ptr{Cvoid}, 1::Int32, null(colptr)::Ptr{Int64}, null(rowval)::Ptr{Int64},
-            null(nzval)::Ptr{Float32}, perm::Ptr{Int64}, buffer::Ptr{UInt8},
-            length(buffer)::Csize_t)::Int32
-    end
-    check(status, buffer)
+    export! = ptr isa SolverPtr ? Native.export_solver_factor : Native.export_factor
+    GC.@preserve colptr rowval nzval perm @native export!(
+        ptr, values ? pointer(colptr) : Ptr{Int64}(C_NULL), pointer(rowval), pointer(nzval),
+        pointer(perm))
     p = invperm(perm)
     return values ? ExportedFactor(SparseMatrixCSC(H.n, H.n, colptr, rowval, nzval), p) : p
 end
@@ -395,13 +384,12 @@ end
 function export_from(H::ApxCholSolver, values::Bool)
     ptr = acquire(H)
     try
-        return GC.@preserve H export_arrays(H, ptr, H.error_buffer, values)
+        return GC.@preserve H export_arrays(H, ptr, values)
     finally
         unlock(H.lock)
     end
 end
-export_from(H::ApxCholFactor, values::Bool) =
-    reading(ptr -> export_arrays(H, ptr, zeros(UInt8, ERROR_CAPACITY), values), H)
+export_from(H::ApxCholFactor, values::Bool) = reading(ptr -> export_arrays(H, ptr, values), H)
 
 """
     ApxChol.factor(S::ApxCholSolver) -> ExportedFactor

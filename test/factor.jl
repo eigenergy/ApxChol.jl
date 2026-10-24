@@ -14,7 +14,7 @@
         @test nnz(f.L) == ApxChol.stats(K).factor_nnz
         @test all(f.L.rowval[f.L.colptr[j]] == j for j in 1:n)     # diagonal first
         # The approximation is spectral: L L' preconditions A[p, p] well, which the
-        # inverse permutation (the C ABI's perm) does not.
+        # inverse permutation (apxchol's perm) does not.
         M = Float64.(f.L) * Float64.(f.L)'
         spread(P) = (λ = eigvals(Symmetric(Matrix(P)), Symmetric(Matrix(M))); maximum(λ) / minimum(λ))
         @test spread(A[f.p, f.p]) < 10
@@ -116,9 +116,9 @@
         @test bits(ApxChol.solve(T, b).x) == bits(ApxChol.solve(S, b).x)
         @test ApxChol.factor(ApxCholFactor(T)) == ApxChol.factor(S)
         # A factor carries no solve options: an adopting solver starts from the defaults.
-        S3 = ApxCholSolver(A; rtol=1e-3, maxiter=7, stagnation_window=3, seed=5, keep_factor=true)
+        S3 = ApxCholSolver(A; rtol=1e-3, maxiter=7, seed=5, keep_factor=true)
         o = ApxChol.options(ApxCholSolver(A, ApxCholFactor(S3)))
-        @test (o.rtol, o.maxiter, o.stagnation_window, o.seed) == (1e-8, 200, 50, 5)
+        @test (o.rtol, o.maxiter, o.seed) == (1e-8, 200, 5)
         @test ApxChol.options(ApxCholSolver(A, ApxCholFactor(S3); rtol=1e-4)).rtol == 1e-4
     end
 

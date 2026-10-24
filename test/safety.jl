@@ -143,27 +143,15 @@
         @test runtimes == [realpath(LLVMOpenMP_jll.libomp_path)]
     end
 
-    @testset "garbage collection proceeds during a long native call (Julia ≥ 1.12)" begin
-        if VERSION < v"1.12" || Threads.nthreads() < 2
-            @info "GC-safe native calls need Julia ≥ 1.12 and ≥ 2 threads; skipping"
-        else
-            A = grid_laplacian(600, 600)
-            b = compatible_rhs(size(A, 1))
-            S = ApxCholSolver(A; threads=1, stagnation_window=0)
-            ApxChol.solve(S, b; maxiter=5)
-            solve_seconds = Ref(0.0)
-            started = Threads.Event()
-            long = Threads.@spawn begin
-                notify(started)
-                solve_seconds[] = @elapsed ApxChol.solve(S, b; rtol=1e-300, maxiter=600)
-            end
-            wait(started); sleep(0.05)
-            gc_seconds = @elapsed GC.gc()
-            still_solving = !istaskdone(long)
-            wait(long)
-            @test solve_seconds[] > 0.2                  # long enough to measure against
-            @test still_solving                         # the collection did not wait for it
-            @test gc_seconds < solve_seconds[] / 2
-        end
+    @testset "garbage collection on other threads never waits for a native call" begin
+        script = joinpath(@__DIR__, "stall.jl")
+        out = readchomp(`$(Base.julia_cmd()) --startup-file=no --project=$(Base.active_project())
+                         -t 2,1 $script`)
+        seconds, stall, safepoint = parse.(Float64, split(out))
+        # Without GC safety both are about the longest native call; the stall
+        # also includes the collection itself, which a loaded machine stretches.
+        @test seconds > 0.5                             # long enough to measure against
+        @test safepoint < seconds / 10
+        @test stall < seconds / 2
     end
 end

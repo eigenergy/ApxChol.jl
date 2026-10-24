@@ -3,28 +3,26 @@
         S = ApxCholSolver(grid_laplacian(4, 4))
         o = ApxChol.options(S)
         @test o.backend == :auto && o.rtol == 1e-8 && o.maxiter == 200
-        @test o.stagnation_window == 50 && o.seed == 42 && o.threads == 0
+        @test o.seed == 42 && o.threads == 0 && o.degree_quantile == -1
         @test o.sampler == :gks && o.partitioner == :block_greedy
         @test !o.keep_factor && o.omp_threshold == 2000 && o.factor_storage === nothing
         s = ApxChol.stats(S)
         @test s.backend == :cpu && S.backend == :cpu
-        @test s.factor_storage == (get(ENV, "APXCHOL_FACTOR_STORAGE", "") == "float16" ? Float16 : Float32)
+        @test s.factor_storage == Float32
         @test sprint(show, S) == "ApxCholSolver(16×16, cpu)"
         close(S)
     end
 
     @testset "every option reaches apxchol and round-trips" begin
         A = grid_laplacian(14, 13; shift=0.01)
-        kw = (backend=:cpu, rtol=1e-6, maxiter=50, stagnation_window=7, seed=9,
-              sampler=:trace_cycle, partitioner=:priority_greedy, degree_quantile=0.5,
-              exact_clique_max_degree=3, omp_threshold=100, factor_storage=Float32,
-              threads=2, keep_factor=true)
+        kw = (backend=:cpu, rtol=1e-6, maxiter=50, seed=9, sampler=:trace_cycle,
+              partitioner=:priority_greedy, degree_quantile=0.5, exact_clique_max_degree=3,
+              omp_threshold=100, factor_storage=Float32, threads=2, keep_factor=true)
         S = ApxCholSolver(A; kw...)
-        @test ApxChol.options(S) == (; backend=:cpu, rtol=1e-6, maxiter=50, stagnation_window=7,
-                                     factor_storage=Float32, threads=2, keep_factor=true, seed=9,
-                                     sampler=:trace_cycle, partitioner=:priority_greedy,
-                                     degree_quantile=0.5, exact_clique_max_degree=3,
-                                     omp_threshold=100)
+        @test ApxChol.options(S) == (; backend=:cpu, rtol=1e-6, maxiter=50, factor_storage=Float32,
+                                     threads=2, keep_factor=true, seed=9, sampler=:trace_cycle,
+                                     partitioner=:priority_greedy, degree_quantile=0.5,
+                                     exact_clique_max_degree=3, omp_threshold=100)
         @test ApxChol.stats(S).setup_max_threads == 2
         r = ApxChol.solve(S, ones(size(A, 1)))
         @test r.converged && r.relative_residual < 1e-6
@@ -120,7 +118,7 @@
     @testset "non-convergence is reported, not thrown" begin
         A = grid_laplacian(5, 5; shift=0.05)
         b = collect(range(1.0, 2.0; length=size(A, 1)))
-        S = ApxCholSolver(A; stagnation_window=0)
+        S = ApxCholSolver(A)
         r = ApxChol.solve(S, b; rtol=1e-300, maxiter=1)
         @test !r.converged && r.iterations == 1 && r.relative_residual > 0 && norm(r.x) > 0
         S1 = ApxCholSolver(A; rtol=1e-300, maxiter=1)
@@ -169,11 +167,8 @@
         else
             @test half isa ApxCholError && half.status == :unsupported      # no FP16 on this CPU
         end
-        withenv("APXCHOL_FACTOR_STORAGE" => "half") do
-            e = caught(() -> ApxCholSolver(A))
-            @test e isa ApxCholError && e.status == :invalid_argument
-            @test occursin("APXCHOL_FACTOR_STORAGE", e.message)
-            @test isopen(ApxCholFactor(A))                   # factorization does not read it
+        withenv("APXCHOL_FACTOR_STORAGE" => "half") do      # no longer read by apxchol
+            @test ApxChol.stats(ApxCholSolver(A)).factor_storage == Float32
         end
     end
 
@@ -198,7 +193,8 @@
                 r = ApxChol.solve(S, ldexp.(b, e))
                 @test r.converged && r.iterations == ref.iterations
                 @test bits(r.x) == bits(ldexp.(ref.x, e))
-                @test r.relative_residual == ref.relative_residual
+                # The same x; apxchol recomputes its residual at the input's scale.
+                @test r.relative_residual ≈ ref.relative_residual rtol = 4eps()
             end
         end
     end
@@ -232,19 +228,16 @@
         @test stats.niter < plain.niter
     end
 
-    @testset "apply: a fixed map for SDDM, fixed up to a constant for a Laplacian" begin
-        if haskey(ENV, "APXCHOL_GROUND") || haskey(ENV, "APXCHOL_CENTER_K")
-            @info "APXCHOL_GROUND or APXCHOL_CENTER_K is set; skipping the center-k checks"
-        else
-            r = compatible_rhs(144; salt=3)
-            P = ApxChol.aspreconditioner(ApxCholSolver(grid_laplacian(12, 12; shift=0.1)))
-            z = [P \ r for _ in 1:10]
+    @testset "apply: a fixed map; centred for a Laplacian" begin
+        r = compatible_rhs(144; salt=3)
+        for shift in (0.1, 0.0)
+            S = ApxCholSolver(grid_laplacian(12, 12; shift))
+            P = ApxChol.aspreconditioner(S)
+            z = [P \ r for _ in 1:12]
             @test all(zi -> bits(zi) == bits(z[1]), z)
-            P = ApxChol.aspreconditioner(ApxCholSolver(grid_laplacian(12, 12)))
-            z = [P \ r for _ in 1:10]                       # the 10th centres (K = 10)
-            @test all(i -> bits(z[i]) == bits(z[1]), 1:9)
-            d = z[10] - z[1]
-            @test norm(d) > 0 && norm(d .- sum(d) / length(d)) <= 1e-10 * norm(z[1])
+            ApxChol.solve(S, r)                            # solves do not change it
+            @test bits(P \ r) == bits(z[1])
+            shift == 0 && @test abs(sum(z[1])) <= 1e-12 * norm(z[1], 1)
         end
     end
 

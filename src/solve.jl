@@ -59,7 +59,7 @@ native(M::AbstractMatrix) =
     M isa StridedMatrix{Float64} && stride(M, 1) == 1 && stride(M, 2) == size(M, 1)
 
 # Exactly aliased arrays are allowed (apxchol copies them first); partially
-# overlapping ones are undefined in C.
+# overlapping ones are copied here.
 function partial_overlap(a, b)
     pa, pb = UInt(pointer(a)), UInt(pointer(b))
     return pa != pb && pa < pb + sizeof(b) && pb < pa + sizeof(a)
@@ -93,17 +93,16 @@ end
 
 # ── Solves ───────────────────────────────────────────────────────────────────
 
-# One apxchol_solver_solve on arrays apxchol can address; returns its info.
+# One solve on arrays apxchol can address; returns its iterations, residual,
+# convergence and seconds.
 function native_solve!(S::ApxCholSolver, out, rhs, guess, tol::Float64, iters::Int32)
     ptr = acquire(S)
     try
         out_owner, rhs_owner, guess_owner = owner(out), owner(rhs), owner(guess)
-        status = GC.@preserve S out_owner rhs_owner guess_owner @native libapxchol.apxchol_solver_solve(
-            ptr::Ptr{Cvoid}, pointer(rhs)::Ptr{Float64}, pointer_or_null(guess)::Ptr{Float64},
-            pointer(out)::Ptr{Float64}, tol::Float64, iters::Int32, S.info::Ref{CSolveInfo},
-            S.error_buffer::Ptr{UInt8}, ERROR_CAPACITY::Csize_t)::Int32
-        check(status, S.error_buffer; not_converged_ok=true)
-        return S.info[]
+        seconds = GC.@preserve S out_owner rhs_owner guess_owner @native Native.solve(
+            ptr, 1, pointer(rhs), pointer_or_null(guess), pointer(out), tol, iters,
+            S.iterations, S.residuals, S.converged)
+        return S.iterations[1], S.residuals[1], S.converged[1] == 1, seconds
     finally
         unlock(S.lock)
     end
@@ -129,16 +128,15 @@ function solve!(x::AbstractVector{Float64}, S::ApxCholSolver, b::AbstractVector{
     check_length(b, S.n, "b"); check_length(x, S.n, "x")
     x0 === nothing || check_length(x0, S.n, "x0")
     tol, iters = call_tol(rtol), call_maxiter(maxiter)
-    info = if native(x) && readable(b, x) && readable(x0, x)
+    iterations, residual, converged, seconds = if native(x) && readable(b, x) && readable(x0, x)
         native_solve!(S, x, b, x0, tol, iters)
     else
         out = Vector{Float64}(undef, S.n)
-        i = native_solve!(S, out, dense(b), dense(x0), tol, iters)
+        info = native_solve!(S, out, dense(b), dense(x0), tol, iters)
         copyto!(x, out)
-        i
+        info
     end
-    return SolveResult(x, Int(info.iterations), info.relative_residual, info.converged == 1,
-                       info.solve_seconds)
+    return SolveResult(x, Int(iterations), residual, converged, seconds)
 end
 
 function native_solve_block!(S::ApxCholSolver, out, rhs, guess, tol::Float64, iters::Int32,
@@ -146,12 +144,9 @@ function native_solve_block!(S::ApxCholSolver, out, rhs, guess, tol::Float64, it
     ptr = acquire(S)
     try
         out_owner, rhs_owner, guess_owner = owner(out), owner(rhs), owner(guess)
-        status = GC.@preserve S out_owner rhs_owner guess_owner @native libapxchol.apxchol_solver_solve_block(
-            ptr::Ptr{Cvoid}, size(out, 2)::Int64, pointer(rhs)::Ptr{Float64},
-            pointer_or_null(guess)::Ptr{Float64}, pointer(out)::Ptr{Float64}, tol::Float64,
-            iters::Int32, iterations::Ptr{Int64}, residuals::Ptr{Float64},
-            converged::Ptr{Int32}, S.error_buffer::Ptr{UInt8}, ERROR_CAPACITY::Csize_t)::Int32
-        check(status, S.error_buffer; not_converged_ok=true)
+        GC.@preserve S out_owner rhs_owner guess_owner iterations residuals converged @native Native.solve(
+            ptr, size(out, 2), pointer(rhs), pointer_or_null(guess), pointer(out), tol, iters,
+            iterations, residuals, converged)
     finally
         unlock(S.lock)
     end
@@ -229,12 +224,9 @@ One preconditioner application `z = M⁻¹ r`: the forward and backward
 triangular solves with the approximate factor. `z` may be `r` itself; on
 contiguous `Float64` vectors a warmed-up call allocates nothing.
 
-With an SDDM factor (`stats(S).sddm`) this is a fixed linear map. With a
-Laplacian factor `z` is defined only up to a constant vector: Metal centres
-input and output on every application; the CPU route centres them on every
-K-th application since the last solve (apxchol's center-k schedule,
-`APXCHOL_CENTER_K`, default 10), so repeated applications to a mean-zero `r`
-agree up to a constant vector.
+It is a fixed linear map on every backend. With a Laplacian factor
+(`!stats(S).sddm`) every application centres its input and output, so `z` has
+mean zero.
 """
 function apply!(z::AbstractVector{Float64}, S::ApxCholSolver, r::AbstractVector{<:Real})
     check_length(r, S.n, "r"); check_length(z, S.n, "z")
@@ -252,10 +244,7 @@ function native_apply!(S::ApxCholSolver, out, r)
     ptr = acquire(S)
     try
         out_owner, r_owner = owner(out), owner(r)
-        status = GC.@preserve S out_owner r_owner @native libapxchol.apxchol_solver_apply(
-            ptr::Ptr{Cvoid}, pointer(r)::Ptr{Float64}, pointer(out)::Ptr{Float64},
-            S.error_buffer::Ptr{UInt8}, ERROR_CAPACITY::Csize_t)::Int32
-        check(status, S.error_buffer)
+        GC.@preserve S out_owner r_owner @native Native.apply(ptr, pointer(r), pointer(out))
     finally
         unlock(S.lock)
     end

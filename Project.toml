@@ -4,6 +4,7 @@ authors = ["Samuel Talkington"]
 version = "0.4.0"
 
 [deps]
+CxxWrap = "1f15a43c-97ca-5a2a-ae31-89f07a497df4"
 LLVMOpenMP_jll = "1d63c593-3942-5779-bab2-d838dc0a180e"
 Libdl = "8f399da3-3557-5675-b5ff-fb832c97cbdb"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
@@ -11,6 +12,7 @@ SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 
 [compat]
 Aqua = "0.8"
+CxxWrap = "0.17"
 Krylov = "0.9, 0.10"
 LLVMOpenMP_jll = "18, 19, 20, 21, 22, 23"
 Libdl = "1"

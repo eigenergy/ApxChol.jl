@@ -122,7 +122,7 @@
         b = ones(size(A, 1))
         H = ApxCholSolver(A; backend=:metal, factor_storage=Float16)
         @test ApxChol.stats(H).factor_storage == Float16 && ApxChol.solve(H, b).converged
-        G = ApxCholSolver(A; backend=:metal, stagnation_window=0)
+        G = ApxCholSolver(A; backend=:metal)
         r = ApxChol.solve(G, b; rtol=1e-30, maxiter=3)
         @test !r.converged && r.iterations == 3
         @test_throws NotConvergedError ApxCholSolver(A; backend=:metal, rtol=1e-30, maxiter=3) \ b

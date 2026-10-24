@@ -1,4 +1,4 @@
-# The apxchol revision this package builds: the C ABI of AlgOptGroup/apxchol
-# PR #3 (samtalki/apxchol branch c-abi). Move to AlgOptGroup/apxchol once it merges.
-repository=https://github.com/samtalki/apxchol.git
-revision=221081211974d698c328a6439dfd5b07e393a026
+# The apxchol revision this package builds: its installable C++ core
+# (cmake/core), which deps/apxchol_jl.cpp wraps with CxxWrap.
+repository=https://github.com/AlgOptGroup/apxchol.git
+revision=84dd0ac6e91f258b6b74d57be9e9ed26b319c4c4

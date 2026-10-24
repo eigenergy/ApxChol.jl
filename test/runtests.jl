@@ -62,7 +62,7 @@ end
 caught(f) = try f(); nothing catch e; e end
 
 @testset "ApxChol" begin
-    include("abi.jl")
+    include("binding.jl")
     include("solve.jl")
     include("factor.jl")
     include("safety.jl")
