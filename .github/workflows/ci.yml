@@ -94,7 +94,7 @@ jobs:
       - name: Check linkage (exactly one OpenMP runtime, the JLL's)
         shell: bash
         run: |
-          lib=$(ls deps/usr/lib/libapxchol.*)
+          lib=$(ls deps/usr/lib/libapxchol_jl.*)
           if [ "$RUNNER_OS" = macOS ]; then deps=$(otool -L "$lib"); else deps=$(readelf -d "$lib"); fi
           echo "$deps"
           [ "$(echo "$deps" | grep -ciE 'lib(g|i)?omp')" = 1 ] || { echo "expected one OpenMP library"; exit 1; }
