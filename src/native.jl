@@ -73,11 +73,14 @@ threads collect garbage meanwhile.
 """
 module Native
 
+using Libdl
 using CxxWrap
 import ..ApxChol
 
 ApxChol.check_build()
-@wrapmodule(() -> ApxChol.libapxchol_jl)
+# Resolve CxxWrap template caches from the already-loaded runtime. Deep binding
+# makes a Clang-built ELF module prefer its own, uninitialized weak definitions.
+@wrapmodule(() -> ApxChol.libapxchol_jl, :define_julia_module, Libdl.RTLD_LAZY)
 
 function __init__()
     ApxChol.check_build()
